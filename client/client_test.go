@@ -6221,8 +6221,9 @@ func testUncompressedRegistryCacheImportExport(t *testing.T, sb integration.Sand
 	testBasicCacheImportExport(t, sb, []CacheOptionsEntry{im}, []CacheOptionsEntry{ex})
 }
 
+// This test passed locally on windows, but failed on github action
 func testZstdLocalCacheImportExport(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	// integration.SkipOnPlatform(t, "windows")
 
 	workers.CheckFeatureCompat(t, sb,
 		workers.FeatureCacheExport,
