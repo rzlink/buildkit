@@ -224,7 +224,7 @@ func computeBlobChain(ctx context.Context, sr *immutableRef, createIfNeeded bool
 					// These compression types aren't supported by containerd differ. So try to compute diff on buildkit side.
 					// This case can be happen on containerd worker + non-overlayfs snapshotter (e.g. native).
 					// See also: https://github.com/containerd/containerd/issues/4263
-					desc, err = walking.NewWalkingDiff(sr.cm.ContentStore).Compare(ctx, lower, upper,
+					desc, err = winlayers.NewWalkingDiffWithWindows(sr.cm.ContentStore, walking.NewWalkingDiff(sr.cm.ContentStore)).Compare(ctx, lower, upper,
 						diff.WithMediaType(mediaType),
 						diff.WithReference(sr.ID()),
 						diff.WithCompressor(compressorFunc),

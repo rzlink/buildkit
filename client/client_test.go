@@ -2483,7 +2483,7 @@ func testOCILayoutSource(t *testing.T, sb integration.Sandbox) {
 
 // This test passed locally on windows, but failed on github action
 func testSessionExporter(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	// integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureOCILayout)
 	c, err := New(context.TODO(), sb.Address())
 	require.NoError(t, err)
@@ -5986,7 +5986,7 @@ func testLazyImagePush(t *testing.T, sb integration.Sandbox) {
 
 // This test passed locally on windows, but failed on github action
 func testZstdLocalCacheExport(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	// integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureCacheExport, workers.FeatureCacheBackendLocal)
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
@@ -6280,7 +6280,7 @@ func testImageManifestRegistryCacheImportExport(t *testing.T, sb integration.San
 
 // This test passed locally on windows, but failed on github action
 func testZstdRegistryCacheImportExport(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	// integration.SkipOnPlatform(t, "windows")
 
 	workers.CheckFeatureCompat(t, sb,
 		workers.FeatureCacheExport,
