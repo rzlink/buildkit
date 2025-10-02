@@ -12,7 +12,6 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/mount"
-	"github.com/containerd/containerd/v2/pkg/archive"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/containerd/v2/pkg/labels"
 	cerrdefs "github.com/containerd/errdefs"
@@ -109,7 +108,7 @@ func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 					return errors.Wrap(err, "failed to get compressed stream")
 				}
 				w, discard, done := makeWindowsLayer(ctx, io.MultiWriter(compressed, dgstr.Hash()))
-				err = archive.WriteDiff(ctx, w, lowerRoot, upperRoot)
+				err = writeDiffWithPrivileges(ctx, w, lowerRoot, upperRoot)
 				if err != nil {
 					discard(err)
 				}
@@ -125,7 +124,8 @@ func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 				config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
 			} else {
 				w, discard, done := makeWindowsLayer(ctx, cw)
-				if err = archive.WriteDiff(ctx, w, lowerRoot, upperRoot); err != nil {
+				err = writeDiffWithPrivileges(ctx, w, lowerRoot, upperRoot)
+				if err != nil {
 					discard(err)
 					return errors.Wrap(err, "failed to write diff")
 				}
