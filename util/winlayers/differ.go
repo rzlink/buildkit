@@ -108,7 +108,7 @@ func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 					return errors.Wrap(err, "failed to get compressed stream")
 				}
 				w, discard, done := makeWindowsLayer(ctx, io.MultiWriter(compressed, dgstr.Hash()))
-				err = writeDiffWithPrivileges(ctx, w, lowerRoot, upperRoot)
+				err = writeDiffWithMetadataFiltering(ctx, w, lowerRoot, upperRoot)
 				if err != nil {
 					discard(err)
 				}
@@ -124,7 +124,7 @@ func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 				config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
 			} else {
 				w, discard, done := makeWindowsLayer(ctx, cw)
-				err = writeDiffWithPrivileges(ctx, w, lowerRoot, upperRoot)
+				err = writeDiffWithMetadataFiltering(ctx, w, lowerRoot, upperRoot)
 				if err != nil {
 					discard(err)
 					return errors.Wrap(err, "failed to write diff")
