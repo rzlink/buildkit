@@ -254,7 +254,6 @@ func testIntegration(t *testing.T, funcs ...func(t *testing.T, sb integration.Sa
 	mirroredImagesUnix["tonistiigi/test:nolayers"] = "docker.io/tonistiigi/test:nolayers"
 	mirroredImagesUnix["cpuguy83/buildkit-foreign:latest"] = "docker.io/cpuguy83/buildkit-foreign:latest"
 	mirroredImagesWin := integration.OfficialImages("nanoserver:latest", "nanoserver:plus")
-	mirroredImagesWin["cpuguy83/buildkit-foreign:latest"] = "docker.io/cpuguy83/buildkit-foreign:latest"
 
 	mirroredImages := integration.UnixOrWindows(mirroredImagesUnix, mirroredImagesWin)
 	mirrors := integration.WithMirroredImages(mirroredImages)
