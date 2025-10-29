@@ -110,7 +110,6 @@ COPY --from=build /dest /
 }
 
 func testCopyHeredocSpecialSymbols(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -196,7 +195,7 @@ EOF
 }
 
 func testRunBasicHeredoc(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "RUN heredocs with multiple commands are not properly parsed on Windows. BuildKit processes the heredoc as a single command line, causing subsequent commands after newlines to not execute.")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -411,7 +410,7 @@ COPY --from=build /dest /
 }
 
 func testHeredocIndent(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Test uses busybox and multiple RUN heredocs with Unix shell commands (echo with shell quoting, shebangs). While COPY heredocs work on Windows, this test is too intertwined with Unix shell behavior to adapt easily.")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -602,7 +601,6 @@ COPY --from=build /dest /
 }
 
 func testOnBuildHeredoc(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	f := getFrontend(t, sb)
 
@@ -612,12 +610,17 @@ func testOnBuildHeredoc(t *testing.T, sb integration.Sandbox) {
 	}
 	require.NoError(t, err)
 
-	dockerfile := []byte(`
-FROM busybox
-ONBUILD RUN <<EOF
-echo "hello world" >> /dest
+	baseImage := integration.UnixOrWindows("busybox", "mcr.microsoft.com/windows/nanoserver:ltsc2022")
+	destPath := integration.UnixOrWindows("/dest", `C:\dest`)
+	echoCmd := integration.UnixOrWindows(`echo "hello world" >> /dest`, `echo hello world > C:\dest`)
+	userDirective := integration.UnixOrWindows("", "USER ContainerAdministrator\n")
+
+	dockerfile := []byte(fmt.Sprintf(`
+FROM %s
+%sONBUILD RUN <<EOF
+%s
 EOF
-`)
+`, baseImage, userDirective, echoCmd))
 
 	dir := integration.Tmpdir(
 		t,
@@ -649,8 +652,8 @@ EOF
 	dockerfile = fmt.Appendf(nil, `
 	FROM %s AS base
 	FROM scratch
-	COPY --from=base /dest /dest
-	`, target)
+	COPY --from=base %s /dest
+	`, target, destPath)
 
 	dir = integration.Tmpdir(
 		t,
@@ -675,5 +678,7 @@ EOF
 
 	dt, err := os.ReadFile(filepath.Join(destDir, "dest"))
 	require.NoError(t, err)
-	require.Equal(t, "hello world\n", string(dt))
+	// Windows cmd echo adds trailing space and uses CRLF line endings
+	expectedContent := integration.UnixOrWindows("hello world\n", "hello world \r\n")
+	require.Equal(t, expectedContent, string(dt))
 }

@@ -306,7 +306,7 @@ func TestIntegration(t *testing.T) {
 }
 
 func testEmptyStringArgInEnv(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Uses env command to dump environment variables which is Unix-specific; Windows equivalent would require set command and different parsing")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -350,10 +350,10 @@ COPY --from=build env.txt .
 }
 
 func testDefaultEnvWithArgs(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
+	dockerfile := []byte(integration.UnixOrWindows(
+		`
 ARG image=idlebox
 FROM busy${image#idle} AS build
 ARG my_arg
@@ -363,17 +363,35 @@ COPY myscript.sh myscript.sh
 RUN ./myscript.sh $my_arg $my_trimmed_arg
 FROM scratch
 COPY --from=build /out /out
-`)
+`,
+		`
+FROM nanoserver AS build
+USER ContainerAdministrator
+ARG my_arg
+ENV my_arg "my_arg=${my_arg:-def_val}"
+ENV my_trimmed_arg "${my_arg%%e*}"
+COPY myscript.cmd myscript.cmd
+RUN myscript.cmd
+FROM nanoserver
+COPY --from=build /out /out
+`,
+	))
 
-	script := []byte(`
+	script := []byte(integration.UnixOrWindows(
+		`
 #!/usr/bin/env sh
 echo -n $my_arg $* > /out
-`)
+`,
+		"@echo off\r\necho %my_arg% %my_arg% %my_trimmed_arg% > out\r\n",
+	))
+
+	scriptName := integration.UnixOrWindows("myscript.sh", "myscript.cmd")
+	scriptMode := integration.UnixOrWindows(os.FileMode(0700), os.FileMode(0600))
 
 	dir := integration.Tmpdir(
 		t,
 		fstest.CreateFile("Dockerfile", dockerfile, 0600),
-		fstest.CreateFile("myscript.sh", script, 0700),
+		fstest.CreateFile(scriptName, script, scriptMode),
 	)
 
 	c, err := client.New(sb.Context(), sb.Address())
@@ -409,7 +427,9 @@ echo -n $my_arg $* > /out
 
 			dt, err := os.ReadFile(filepath.Join(destDir, "out"))
 			require.NoError(t, err)
-			require.Equal(t, x.expected, string(dt))
+
+			actual := integration.UnixOrWindows(string(dt), strings.TrimSpace(string(dt)))
+			require.Equal(t, x.expected, actual)
 		})
 	}
 }
@@ -600,7 +620,7 @@ RUN cmd /V:on /C "set /p tfcontent=<\sample\testfile \
 }
 
 func testCopyLinkDotDestDir(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "COPY --link requires diffApply which is not supported on Windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -630,7 +650,7 @@ RUN [ "$(cat testfile)" == "contents0" ]
 }
 
 func testCopyLinkEmptyDestDir(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "COPY --link requires diffApply which is not supported on Windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -804,7 +824,7 @@ COPY foo foo
 }
 
 func testTarExporterMulti(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Multi-platform tar export test specifically targets linux/amd64 and darwin/amd64 platforms")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1079,7 +1099,7 @@ ENV foo bar
 }
 
 func testCopyChownExistingDir(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Test validates Unix chown behavior with UIDs/GIDs using stat command, not applicable to Windows file permissions")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1405,17 +1425,17 @@ FROM target
 }
 
 func testWorkdirCopyIgnoreRelative(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
-FROM scratch AS base
+	baseImage := integration.UnixOrWindows("scratch", "nanoserver:latest")
+	dockerfile := []byte(fmt.Sprintf(`
+FROM %[1]s AS base
 WORKDIR /foo
 COPY Dockerfile / 
-FROM scratch
+FROM %[1]s
 # relative path still loaded as absolute
 COPY --from=base Dockerfile .
-`)
+`, baseImage))
 
 	dir := integration.Tmpdir(
 		t,
@@ -1476,7 +1496,7 @@ RUN (icacls \mydir | findstr "testuser" >nul) || exit /b 1
 }
 
 func testCopyChownCreateDest(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Uses adduser command and stat for Unix UID/GID validation, not applicable to Windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1611,7 +1631,7 @@ COPY --from=build /sub2/foo bar
 }
 
 func testCopySocket(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Tests Unix socket file handling which is not supported on Windows in the same way")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -1895,7 +1915,7 @@ RUN echo %a1%:%a3%:%a4%> /out
 }
 
 func testDefaultShellAndPath(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Cross-platform multi-arch builds with scratch not fully supported on Windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter)
 	f := getFrontend(t, sb)
 
@@ -2156,7 +2176,7 @@ RUN echo %PATH% > env_path.txt
 }
 
 func testExportMultiPlatform(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Multi-platform builds from scratch fail on Windows: 'number of mounts should always be 1 for Windows layers'")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureMultiPlatform)
 	f := getFrontend(t, sb)
 
@@ -2757,7 +2777,7 @@ ENTRYPOINT []random string
 }
 
 func testPullScratch(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "FROM scratch image pulling test requires containerd worker and Linux platform behavior")
 	f := getFrontend(t, sb)
 
 	cdAddress := sb.ContainerdAddress()
@@ -3074,9 +3094,9 @@ FNTRYPOINT ["cmd", "/c", "echo invalidinstruction"]
 }
 
 func testDockerfileADDFromURL(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
+	// integration.SkipOnPlatform(t, "windows", "Last-Modified header from HTTP ADD not preserved on Windows")
 
 	modTime := time.Now().Add(-24 * time.Hour) // avoid falso positive with current time
 
@@ -3152,7 +3172,10 @@ ADD %s /dest/
 
 	fi, err := os.Stat(destFile)
 	require.NoError(t, err)
-	require.Equal(t, modTime.Format(http.TimeFormat), fi.ModTime().Format(http.TimeFormat))
+	if runtime.GOOS != "windows" {
+		// Windows container layer filesystem (implemented by HCS) doesn't preserve file modification times during layer commit/read operations
+		require.Equal(t, modTime.Format(http.TimeFormat), fi.ModTime().Format(http.TimeFormat))
+	}
 
 	stats := server.Stats("/foo")
 	require.Len(t, stats.Requests, 2)
@@ -3370,7 +3393,7 @@ ADD %s /newname.tar.gz
 }
 
 func testDockerfileAddChownArchive(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "ADD --chown tests Unix UID/GID ownership which is not applicable to Windows file permissions")
 	f := getFrontend(t, sb)
 
 	buf := bytes.NewBuffer(nil)
@@ -3514,7 +3537,7 @@ ADD *.tar /dest
 }
 
 func testDockerfileAddChownExpand(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "ADD --chown with variable expansion tests Unix ownership with stat command, not applicable to Windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3548,7 +3571,7 @@ RUN [ "$(stat -c "%u %G" /foo)" == "1000 nobody" ]
 }
 
 func testSymlinkDestination(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Tests Unix symlink behavior with FROM scratch which is not well-supported on Windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -3592,7 +3615,6 @@ COPY foo /symlink/
 }
 
 func testDockerfileCopyFromArgs(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -3620,7 +3642,7 @@ COPY --from=$FOO . .
 }
 
 func testDockerfileScratchConfig(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "FROM scratch image config test requires containerd worker and Linux platform behavior")
 	cdAddress := sb.ContainerdAddress()
 	if cdAddress == "" {
 		t.Skip("test requires containerd worker")
@@ -3920,23 +3942,29 @@ FROM nanoserver
 }
 
 func testExportedHistory(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
+	baseImage := integration.UnixOrWindows("busybox", "mcr.microsoft.com/windows/nanoserver:ltsc2022")
+	workdir := integration.UnixOrWindows("/", "C:\\workdir")
+	// On Windows, use relative path to avoid root directory redirect issues
+	echoCmd := integration.UnixOrWindows("echo bar > foo4", "echo bar > foo4")
+	// Use JSON array form to avoid shell redirect issues on Windows
+	lsCmd := integration.UnixOrWindows(`["ls"]`, `["cmd", "/S", "/C", "dir"]`)
+
 	// using multi-stage to test that history is scoped to one stage
-	dockerfile := []byte(`
-FROM busybox AS base
+	dockerfile := []byte(fmt.Sprintf(`
+FROM %s AS base
 ENV foo=bar
 COPY foo /foo2
-FROM busybox
+FROM %s
 LABEL lbl=val
 COPY --from=base foo2 foo3
-WORKDIR /
-RUN echo bar > foo4
-RUN ["ls"]
+WORKDIR %s
+RUN %s
+RUN %s
 EXPOSE 2375 5000 1234/udp
-`)
+`, baseImage, baseImage, workdir, echoCmd, lsCmd))
 
 	dir := integration.Tmpdir(
 		t,
@@ -3979,28 +4007,45 @@ EXPOSE 2375 5000 1234/udp
 	require.NoError(t, err)
 
 	require.Equal(t, "layers", ociimg.RootFS.Type)
-	// this depends on busybox. should be ok after freezing images
-	require.Equal(t, 4, len(ociimg.RootFS.DiffIDs))
+	// this depends on base image. should be ok after freezing images
+	expectedDiffIDs := integration.UnixOrWindows(4, 5)
+	require.Equal(t, expectedDiffIDs, len(ociimg.RootFS.DiffIDs))
 
-	require.Equal(t, 8, len(ociimg.History))
-	require.Contains(t, ociimg.History[2].CreatedBy, "lbl=val")
-	require.Equal(t, true, ociimg.History[2].EmptyLayer)
-	require.NotNil(t, ociimg.History[2].Created)
-	require.Contains(t, ociimg.History[3].CreatedBy, "COPY foo2 foo3")
-	require.Equal(t, false, ociimg.History[3].EmptyLayer)
-	require.NotNil(t, ociimg.History[3].Created)
-	require.Contains(t, ociimg.History[4].CreatedBy, "WORKDIR /")
-	require.Equal(t, true, ociimg.History[4].EmptyLayer)
-	require.NotNil(t, ociimg.History[4].Created)
-	require.Contains(t, ociimg.History[5].CreatedBy, "echo bar > foo4")
-	require.Equal(t, false, ociimg.History[5].EmptyLayer)
-	require.NotNil(t, ociimg.History[5].Created)
-	require.Contains(t, ociimg.History[6].CreatedBy, "RUN ls")
-	require.Equal(t, false, ociimg.History[6].EmptyLayer)
-	require.NotNil(t, ociimg.History[6].Created)
-	require.Contains(t, ociimg.History[7].CreatedBy, "EXPOSE [1234/udp 2375/tcp 5000/tcp]")
-	require.Equal(t, true, ociimg.History[7].EmptyLayer)
-	require.NotNil(t, ociimg.History[7].Created)
+	// Windows nanoserver has 1 base history entry (for 2 layers) vs busybox's 2 entries (for 1 layer)
+	// Total: busybox (2 base + 6 new = 8), nanoserver (1 base + 6 new = 7)
+	expectedHistoryCount := integration.UnixOrWindows(8, 7)
+	require.Equal(t, expectedHistoryCount, len(ociimg.History))
+
+	// History indices: Windows has 1 base entry (starts at index 1), Unix has 2 base entries (starts at index 2)
+	historyOffset := integration.UnixOrWindows(2, 1)
+
+	require.Contains(t, ociimg.History[historyOffset].CreatedBy, "lbl=val")
+	require.Equal(t, true, ociimg.History[historyOffset].EmptyLayer)
+	require.NotNil(t, ociimg.History[historyOffset].Created)
+	require.Contains(t, ociimg.History[historyOffset+1].CreatedBy, "COPY foo2 foo3")
+	require.Equal(t, false, ociimg.History[historyOffset+1].EmptyLayer)
+	require.NotNil(t, ociimg.History[historyOffset+1].Created)
+	// The history records the Dockerfile command as written, so it's "/workdir" on both platforms
+	// even though Windows converts it to "C:\workdir" at runtime
+	expectedWorkdir := integration.UnixOrWindows("WORKDIR /", "WORKDIR /workdir")
+	require.Contains(t, ociimg.History[historyOffset+2].CreatedBy, expectedWorkdir)
+	// On Windows, WORKDIR may create a directory and thus not be an empty layer
+	expectedWorkdirEmptyLayer := integration.UnixOrWindows(true, false)
+	require.Equal(t, expectedWorkdirEmptyLayer, ociimg.History[historyOffset+2].EmptyLayer)
+	require.NotNil(t, ociimg.History[historyOffset+2].Created)
+	expectedEcho := integration.UnixOrWindows("echo bar > foo4", "echo bar > foo4")
+	require.Contains(t, ociimg.History[historyOffset+3].CreatedBy, expectedEcho)
+	require.Equal(t, false, ociimg.History[historyOffset+3].EmptyLayer)
+	require.NotNil(t, ociimg.History[historyOffset+3].Created)
+	expectedLs := integration.UnixOrWindows("RUN ls", "RUN cmd /S /C dir")
+	require.Contains(t, ociimg.History[historyOffset+4].CreatedBy, expectedLs)
+	require.Equal(t, false, ociimg.History[historyOffset+4].EmptyLayer)
+	require.NotNil(t, ociimg.History[historyOffset+4].Created)
+	// On Windows, EXPOSE may be formatted differently in history
+	expectedExpose := integration.UnixOrWindows("EXPOSE [1234/udp 2375/tcp 5000/tcp]", "EXPOSE")
+	require.Contains(t, ociimg.History[historyOffset+5].CreatedBy, expectedExpose)
+	require.Equal(t, true, ociimg.History[historyOffset+5].EmptyLayer)
+	require.NotNil(t, ociimg.History[historyOffset+5].Created)
 }
 
 // moby/buildkit#5505
@@ -4074,7 +4119,7 @@ RUN dir C:\Windows
 }
 
 func testUser(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "USER instruction tests rely on Unix /etc/passwd, /etc/group, and id command which are not available on Windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureImageExporter)
 	f := getFrontend(t, sb)
 
@@ -4219,7 +4264,7 @@ USER nobody
 // testUserAdditionalGids ensures that that the primary GID is also included in the additional GID list.
 // CVE-2023-25173: https://github.com/advisories/GHSA-hmfx-3pcx-653p
 func testUserAdditionalGids(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Tests Unix GID behavior using id command and /etc/passwd, not applicable to Windows")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -4256,7 +4301,7 @@ RUN [ "$(id)" = "uid=1(daemon) gid=1(daemon) groups=1(daemon)" ]
 func testCopyChown(t *testing.T, sb integration.Sandbox) {
 	// This test should work on Windows, but requires a proper image, and we will need
 	// to check SIDs instead of UIDs.
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "COPY --chown tests use Unix UIDs/GIDs and stat command; Windows would require SIDs and different validation approach")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(`
@@ -5383,7 +5428,6 @@ ONBUILD RUN mkdir \out && echo 11>> \out\foo
 // not run again if another stage inherits from current stage.
 // moby/buildkit#5578
 func testOnBuildWithChildStage(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	f := getFrontend(t, sb)
 
@@ -5393,10 +5437,13 @@ func testOnBuildWithChildStage(t *testing.T, sb integration.Sandbox) {
 	}
 	require.NoError(t, err)
 
-	dockerfile := []byte(`
-FROM busybox
-ONBUILD RUN mkdir -p /out && echo -n yes >> /out/didrun
-`)
+	baseImage := integration.UnixOrWindows("busybox", "mcr.microsoft.com/windows/nanoserver:ltsc2022")
+	mkdirCmd := integration.UnixOrWindows("mkdir -p /out && echo -n yes >> /out/didrun", "mkdir c:\\out && echo yes > c:\\out\\didrun")
+
+	dockerfile := fmt.Appendf(nil, `
+FROM %s
+ONBUILD RUN %s
+`, baseImage, mkdirCmd)
 
 	dir := integration.Tmpdir(
 		t,
@@ -5426,18 +5473,26 @@ ONBUILD RUN mkdir -p /out && echo -n yes >> /out/didrun
 	}, nil)
 	require.NoError(t, err)
 
+	outDir := integration.UnixOrWindows("/out", "c:\\out")
+	stepPath := integration.UnixOrWindows("/step", "c:\\out\\step")
+	checkFileExists := integration.UnixOrWindows("[ -f %s/didrun ] && touch %s1", "if exist %s\\didrun type nul > %s1")
+	removeFile := integration.UnixOrWindows("rm %s/didrun", "del %s\\didrun")
+	checkFileNotExists := integration.UnixOrWindows("[ ! -f %s/didrun ] && touch %s2", "if not exist %s\\didrun type nul > %s2")
+	checkFileNotExistsStep3 := integration.UnixOrWindows("[ ! -f %s/didrun ] && touch %s3", "if not exist %s\\didrun type nul > %s3")
+	copyPattern := integration.UnixOrWindows("/step*", "/out/step*")
+
 	dockerfile = fmt.Appendf(nil, `
 FROM %s AS base
-RUN [ -f /out/didrun ] && touch /step1
-RUN rm /out/didrun
-RUN [ ! -f /out/didrun ] && touch /step2
+RUN `+checkFileExists+`
+RUN `+removeFile+`
+RUN `+checkFileNotExists+`
 
 FROM base AS child
-RUN [ ! -f /out/didrun ] && touch /step3
+RUN `+checkFileNotExistsStep3+`
 
 FROM scratch
-COPY --from=child /step* /
-	`, target)
+COPY --from=child %s /
+	`, target, outDir, stepPath, outDir, outDir, stepPath, outDir, stepPath, copyPattern)
 
 	dir = integration.Tmpdir(
 		t,
@@ -5709,7 +5764,7 @@ COPY --from=mid /out/bar /bar
 }
 
 func testOnBuildNewDeps(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Windows command equivalents for echo -n and complex shell redirections are challenging to adapt reliably")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	f := getFrontend(t, sb)
 
@@ -5752,12 +5807,12 @@ ONBUILD COPY --from=alpine /etc/alpine-release /out/alpine-release2
 	}, nil)
 	require.NoError(t, err)
 
-	dockerfile = fmt.Appendf(nil, `
-	FROM %s AS base
+	dockerfile = []byte(`
+	FROM ` + target + ` AS base
 	RUN cat /out/alpine-release2 > /out/alpine-release3
 	FROM scratch
 	COPY --from=base /out /
-	`, target)
+	`)
 
 	dir = integration.Tmpdir(
 		t,
@@ -5813,15 +5868,15 @@ ONBUILD RUN --mount=type=bind,target=/in,from=inputstage mkdir /out && cat /in/f
 	}, nil)
 	require.NoError(t, err)
 
-	dockerfile = fmt.Appendf(nil, `
-	FROM %s AS inputstage
+	dockerfile = []byte(`
+	FROM ` + target + ` AS inputstage
 	RUN cat /out/alpine-release2 > /out/alpine-release4
 	RUN echo -n foo > /foo
-	FROM %s AS base
+	FROM ` + target2 + ` AS base
 	RUN echo -n bar3 > /out/bar3
 	FROM scratch
 	COPY --from=base /out /
-	`, target, target2)
+	`)
 
 	dir = integration.Tmpdir(
 		t,
@@ -5927,7 +5982,7 @@ RUN --mount=type=cache,target=C:\cache type C:\cache\foo | findstr "42" && type 
 }
 
 func testCacheMultiPlatformImportExport(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "test builds for linux/amd64 and linux/arm/v7 platforms, uses Linux-specific base image (busybox) and Linux commands (/dev/urandom, sha256sum)")
 	workers.CheckFeatureCompat(t, sb,
 		workers.FeatureDirectPush,
 		workers.FeatureCacheExport,
@@ -6649,17 +6704,23 @@ COPY foo2 bar2
 }
 
 func testPlatformArgsExplicit(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
-FROM --platform=$BUILDPLATFORM busybox AS build
+	baseImage := integration.UnixOrWindows("busybox", "nanoserver:latest")
+	mkdirCmd := integration.UnixOrWindows("mkdir /out", "mkdir out")
+	echoCmd := integration.UnixOrWindows(
+		"echo -n $TARGETPLATFORM > /out/platform && echo -n $TARGETOS > /out/os",
+		"echo %TARGETPLATFORM%> out\\platform & echo %TARGETOS%> out\\os",
+	)
+
+	dockerfile := []byte(fmt.Sprintf(`
+FROM --platform=$BUILDPLATFORM %s AS build
 ARG TARGETPLATFORM
 ARG TARGETOS
-RUN mkdir /out && echo -n $TARGETPLATFORM > /out/platform && echo -n $TARGETOS > /out/os
+RUN %s && %s
 FROM scratch
 COPY --from=build out .
-`)
+`, baseImage, mkdirCmd, echoCmd))
 
 	dir := integration.Tmpdir(
 		t,
@@ -6694,11 +6755,13 @@ COPY --from=build out .
 
 	dt, err := os.ReadFile(filepath.Join(destDir, "platform"))
 	require.NoError(t, err)
-	require.Equal(t, "darwin/ppc64le", string(dt))
+	platformStr := integration.UnixOrWindows(string(dt), strings.TrimSpace(string(dt)))
+	require.Equal(t, "darwin/ppc64le", platformStr)
 
 	dt, err = os.ReadFile(filepath.Join(destDir, "os"))
 	require.NoError(t, err)
-	require.Equal(t, "freebsd", string(dt))
+	osStr := integration.UnixOrWindows(string(dt), strings.TrimSpace(string(dt)))
+	require.Equal(t, "freebsd", osStr)
 }
 
 func testBuiltinArgs(t *testing.T, sb integration.Sandbox) {
@@ -8666,7 +8729,7 @@ COPY --from=build /foo /out /
 }
 
 func testNamedFilteredContext(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "COPY --link requires diffApply which is not supported on Windows")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -9280,7 +9343,7 @@ EOF
 }
 
 func testReproSourceDateEpoch(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "COPY --link requires diffApply which is not supported on Windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureSourceDateEpoch)
 	if sb.Snapshotter() == "native" {
 		t.Skip("the digest is not reproducible with the \"native\" snapshotter because hardlinks are processed in a different way: https://github.com/moby/buildkit/pull/3456#discussion_r1062650263")
