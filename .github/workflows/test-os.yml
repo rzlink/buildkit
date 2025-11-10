@@ -112,13 +112,17 @@ jobs:
             worker: containerd
             pkg: ./...
             skip-integration-tests: 1
+          - os: windows-2022
+            worker: containerd
+            pkg: ./frontend/dockerfile
+            tags: dfparents
     steps:
       -
         name: Prepare
         run: |
           TESTPKG=$(echo "${{ matrix.pkg }}" | awk '-F#' '{print $1}')
           echo "TESTPKG=$TESTPKG" >> $GITHUB_ENV
-          echo "TEST_REPORT_NAME=${{ github.job }}-$(echo "${{ matrix.pkg }}-${{ matrix.skip-integration-tests }}-${{ matrix.worker }}" | tr -dc '[:alnum:]-\n\r' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "TEST_REPORT_NAME=${{ github.job }}-$(echo "${{ matrix.pkg }}-${{ matrix.skip-integration-tests }}-${{ matrix.worker }}-${{ matrix.tags }}" | tr -dc '[:alnum:]-\n\r' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
           testFlags="${{ env.TESTFLAGS }}"
           testSlice=$(echo "${{ matrix.pkg }}" | awk '-F#' '{print $2}')
           testSliceOffset=""
@@ -127,6 +131,9 @@ jobs:
           fi
           if [ -n "${{ matrix.worker }}" ]; then
             testFlags="${testFlags} --run=TestIntegration/$testSliceOffset.*/worker=${{ matrix.worker }}"
+          fi
+          if [ -n "${{ matrix.tags }}" ]; then
+            testFlags="${testFlags} --tags=${{ matrix.tags }}"
           fi
           echo "TESTFLAGS=${testFlags}" >> $GITHUB_ENV
         shell: bash
