@@ -3,6 +3,8 @@
 package file
 
 import (
+	"context"
+
 	"github.com/moby/sys/user"
 	"github.com/pkg/errors"
 	copy "github.com/tonistiigi/fsutil/copy"
@@ -40,4 +42,9 @@ func mapUserToChowner(user *copy.User, idmap *user.IdentityMapping) (copy.Chowne
 	return func(*copy.User) (*copy.User, error) {
 		return &u, nil
 	}, nil
+}
+
+// doCopyWithAccessDeniedHandling is a no-op on Unix platforms
+func doCopyWithAccessDeniedHandling(ctx context.Context, srcRoot string, src string, destRoot string, dest string, opt ...copy.Opt) error {
+	return copy.Copy(ctx, srcRoot, src, destRoot, dest, opt...)
 }
