@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -45,9 +46,18 @@ type winDiffer struct {
 // Compare creates a diff between the given mounts and uploads the result
 // to the content store.
 func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispecs.Descriptor, err error) {
-	if !hasWindowsLayerMode(ctx) {
-		return s.d.Compare(ctx, lower, upper, opts...)
+	if hasWindowsLayerMode(ctx) {
+		return s.compareWindowsLayer(ctx, lower, upper, opts...)
 	}
+	if hasLinuxLayerMode(ctx) {
+		return s.compareLinuxLayer(ctx, lower, upper, opts...)
+	}
+	return s.d.Compare(ctx, lower, upper, opts...)
+}
+
+// compareWindowsLayer generates a Windows-format tarball from a Linux filesystem diff.
+// Used when a Windows layer is stored on a Linux host.
+func (s *winDiffer) compareWindowsLayer(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispecs.Descriptor, err error) {
 
 	var config diff.Config
 	for _, opt := range opts {
@@ -125,6 +135,122 @@ func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 				config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
 			} else {
 				w, discard, done := makeWindowsLayer(ctx, cw)
+				if err = archive.WriteDiff(ctx, w, lowerRoot, upperRoot); err != nil {
+					discard(err)
+					return errors.Wrap(err, "failed to write diff")
+				}
+				<-done
+			}
+
+			var commitopts []content.Opt
+			if config.Labels != nil {
+				commitopts = append(commitopts, content.WithLabels(config.Labels))
+			}
+
+			dgst := cw.Digest()
+			if err := cw.Commit(ctx, 0, dgst, commitopts...); err != nil {
+				return errors.Wrap(err, "failed to commit")
+			}
+
+			info, err := s.store.Info(ctx, dgst)
+			if err != nil {
+				return errors.Wrap(err, "failed to get info from content store")
+			}
+
+			ocidesc = ocispecs.Descriptor{
+				MediaType: config.MediaType,
+				Size:      info.Size,
+				Digest:    info.Digest,
+			}
+			return nil
+		})
+	}); err != nil {
+		return emptyDesc, err
+	}
+
+	return ocidesc, nil
+}
+
+// compareLinuxLayer generates a Linux-format tarball from a Windows filesystem diff.
+// Used when a Linux layer is stored on a Windows host with Files/ prefix.
+// Strips the "Files/" prefix and Windows-specific headers from the diff output.
+func (s *winDiffer) compareLinuxLayer(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispecs.Descriptor, err error) {
+	var config diff.Config
+	for _, opt := range opts {
+		if err := opt(&config); err != nil {
+			return emptyDesc, err
+		}
+	}
+
+	if config.MediaType == "" {
+		config.MediaType = ocispecs.MediaTypeImageLayerGzip
+	}
+
+	var isCompressed bool
+	switch config.MediaType {
+	case ocispecs.MediaTypeImageLayer:
+	case ocispecs.MediaTypeImageLayerGzip:
+		isCompressed = true
+	default:
+		return emptyDesc, errors.Wrapf(cerrdefs.ErrNotImplemented, "unsupported diff media type: %v", config.MediaType)
+	}
+
+	var ocidesc ocispecs.Descriptor
+	if err := mount.WithTempMount(ctx, lower, func(lowerRoot string) error {
+		return mount.WithTempMount(ctx, upper, func(upperRoot string) error {
+			var newReference bool
+			if config.Reference == "" {
+				newReference = true
+				config.Reference = uniqueRef()
+			}
+
+			cw, err := s.store.Writer(ctx,
+				content.WithRef(config.Reference),
+				content.WithDescriptor(ocispecs.Descriptor{
+					MediaType: config.MediaType,
+				}))
+			if err != nil {
+				return errors.Wrap(err, "failed to open writer")
+			}
+			defer func() {
+				if err != nil {
+					cw.Close()
+					if newReference {
+						if err := s.store.Abort(ctx, config.Reference); err != nil {
+							bklog.G(ctx).WithField("ref", config.Reference).Warnf("failed to delete diff upload")
+						}
+					}
+				}
+			}()
+			if !newReference {
+				if err := cw.Truncate(0); err != nil {
+					return err
+				}
+			}
+
+			if isCompressed {
+				dgstr := digest.SHA256.Digester()
+				compressed, err := compression.CompressStream(cw, compression.Gzip)
+				if err != nil {
+					return errors.Wrap(err, "failed to get compressed stream")
+				}
+				w, discard, done := stripWindowsLayer(ctx, io.MultiWriter(compressed, dgstr.Hash()))
+				err = archive.WriteDiff(ctx, w, lowerRoot, upperRoot)
+				if err != nil {
+					discard(err)
+				}
+				<-done
+				compressed.Close()
+				if err != nil {
+					return errors.Wrap(err, "failed to write compressed diff")
+				}
+
+				if config.Labels == nil {
+					config.Labels = map[string]string{}
+				}
+				config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
+			} else {
+				w, discard, done := stripWindowsLayer(ctx, cw)
 				if err = archive.WriteDiff(ctx, w, lowerRoot, upperRoot); err != nil {
 					discard(err)
 					return errors.Wrap(err, "failed to write diff")
@@ -259,6 +385,69 @@ func makeWindowsLayer(ctx context.Context, w io.Writer) (io.Writer, func(error),
 		}()
 		if err != nil {
 			bklog.G(ctx).Errorf("makeWindowsLayer %+v", err)
+		}
+		pw.CloseWithError(err)
+		done <- err
+	}()
+
+	discard := func(err error) {
+		pw.CloseWithError(err)
+	}
+
+	return pw, discard, done
+}
+
+// stripWindowsLayer strips the "Files/" prefix and Windows-specific metadata
+// from a Windows-format tar stream to produce a standard Linux-format tar.
+// This is the inverse of makeWindowsLayer.
+func stripWindowsLayer(ctx context.Context, w io.Writer) (io.Writer, func(error), chan error) {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+
+	go func() {
+		tarReader := tar.NewReader(pr)
+		tarWriter := tar.NewWriter(w)
+
+		err := func() error {
+			for {
+				h, err := tarReader.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return err
+				}
+
+				if after, ok := strings.CutPrefix(h.Name, "Files/"); ok {
+					h.Name = after
+					h.Linkname = strings.TrimPrefix(h.Linkname, "Files/")
+
+					// Remove Windows-specific PAX records
+					delete(h.PAXRecords, keyFileAttr)
+					delete(h.PAXRecords, keySDRaw)
+					delete(h.PAXRecords, keyCreationTime)
+
+					if err := tarWriter.WriteHeader(h); err != nil {
+						return err
+					}
+					if h.Size > 0 {
+						//nolint:gosec // never read into memory
+						if _, err := io.Copy(tarWriter, tarReader); err != nil {
+							return err
+						}
+					}
+				} else if h.Size > 0 {
+					// Discard non-Files entries (e.g., Hives/)
+					//nolint:gosec // never read into memory
+					if _, err := io.Copy(io.Discard, tarReader); err != nil {
+						return err
+					}
+				}
+			}
+			return tarWriter.Close()
+		}()
+		if err != nil {
+			bklog.G(ctx).Errorf("stripWindowsLayer %+v", err)
 		}
 		pw.CloseWithError(err)
 		done <- err
