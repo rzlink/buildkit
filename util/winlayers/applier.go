@@ -40,10 +40,13 @@ func (s *winApplier) Apply(ctx context.Context, desc ocispecs.Descriptor, mounts
 		desc.MediaType = ocispecs.MediaTypeImageLayerZstd
 	}
 
-	if hasWindowsLayerMode(ctx) {
+	winMode := hasWindowsLayerMode(ctx)
+	linuxMode := hasLinuxLayerMode(ctx)
+
+	if winMode {
 		return s.applyWindowsLayer(ctx, desc, mounts, opts...)
 	}
-	if hasLinuxLayerMode(ctx) {
+	if linuxMode {
 		return s.applyLinuxLayer(ctx, desc, mounts, opts...)
 	}
 	return s.apply(ctx, desc, mounts, opts...)
@@ -116,61 +119,70 @@ func (s *winApplier) applyWindowsLayer(ctx context.Context, desc ocispecs.Descri
 }
 
 // applyLinuxLayer applies a Linux-format layer on a Windows host by wrapping
-// tar entries with "Files/" prefix and adding Windows PAX headers and ACL.
+// the tar with Windows layer structure (Files/ prefix, PAX headers) and
+// importing it via HCS (Host Compute Service). This creates a proper Windows
+// container layer with VHDs and metadata so the Windows snapshotter can
+// mount and manage it.
 func (s *winApplier) applyLinuxLayer(ctx context.Context, desc ocispecs.Descriptor, mounts []mount.Mount, opts ...diff.ApplyOpt) (d ocispecs.Descriptor, err error) {
 	compressed, err := images.DiffCompression(ctx, desc.MediaType)
 	if err != nil {
 		return ocispecs.Descriptor{}, errors.Wrapf(cerrdefs.ErrNotImplemented, "unsupported diff media type: %v", desc.MediaType)
 	}
 
-	var ocidesc ocispecs.Descriptor
-	if err := mount.WithTempMount(ctx, mounts, func(root string) error {
-		ra, err := s.cs.ReaderAt(ctx, desc)
+	if len(mounts) == 0 {
+		return ocispecs.Descriptor{}, errors.New("no mounts provided for linux layer apply")
+	}
+
+	// Get the snapshot directory and parent layer paths from mount metadata.
+	snapshotDir := mounts[0].Source
+	parentPaths := getParentLayerPaths(mounts)
+
+	ra, err := s.cs.ReaderAt(ctx, desc)
+	if err != nil {
+		return ocispecs.Descriptor{}, errors.Wrap(err, "failed to get reader from content store")
+	}
+	defer ra.Close()
+
+	r := content.NewReader(ra)
+	if compressed != "" {
+		ds, err := compression.DecompressStream(r)
 		if err != nil {
-			return errors.Wrap(err, "failed to get reader from content store")
+			return ocispecs.Descriptor{}, err
 		}
-		defer ra.Close()
+		defer ds.Close()
+		r = ds
+	}
 
-		r := content.NewReader(ra)
-		if compressed != "" {
-			ds, err := compression.DecompressStream(r)
-			if err != nil {
-				return err
-			}
-			defer ds.Close()
-			r = ds
-		}
+	digester := digest.Canonical.Digester()
+	rc := &readCounter{
+		r: io.TeeReader(r, digester.Hash()),
+	}
 
-		digester := digest.Canonical.Digester()
-		rc := &readCounter{
-			r: io.TeeReader(r, digester.Hash()),
-		}
+	// Wrap the Linux tar with Windows layer structure: add Hives/ and Files/
+	// directories, prefix all entries with "Files/", and add Windows PAX
+	// headers and security descriptors.
+	wrappedTar, discard, done := wrapLinuxToWindows(ctx, rc)
 
-		// Wrap the Linux tar stream into Windows format (add Files/ prefix, Hives/, headers, ACL)
-		rc2, discard, done := wrapLinuxToWindows(ctx, rc)
-		if _, err := archive.Apply(ctx, root, rc2); err != nil {
-			discard(err)
-			return err
-		}
+	// Import via HCS which creates Files/, Hives/, blank.vhdx, and all
+	// required Windows layer metadata in the snapshot directory.
+	if _, err := importLinuxLayerAsWindows(ctx, snapshotDir, wrappedTar, parentPaths); err != nil {
+		discard(err)
+		return ocispecs.Descriptor{}, errors.Wrap(err, "failed to import linux layer as windows layer")
+	}
 
-		if err := <-done; err != nil {
-			return err
-		}
+	if err := <-done; err != nil {
+		return ocispecs.Descriptor{}, errors.Wrap(err, "failed wrapping linux tar")
+	}
 
-		// Read any trailing data
-		if _, err := io.Copy(io.Discard, rc); err != nil {
-			discard(err)
-			return err
-		}
-
-		ocidesc = ocispecs.Descriptor{
-			MediaType: ocispecs.MediaTypeImageLayer,
-			Size:      rc.c,
-			Digest:    digester.Digest(),
-		}
-		return nil
-	}); err != nil {
+	// Read any trailing data for correct size/digest
+	if _, err := io.Copy(io.Discard, rc); err != nil {
 		return ocispecs.Descriptor{}, err
+	}
+
+	ocidesc := ocispecs.Descriptor{
+		MediaType: ocispecs.MediaTypeImageLayer,
+		Size:      rc.c,
+		Digest:    digester.Digest(),
 	}
 	return ocidesc, nil
 }
