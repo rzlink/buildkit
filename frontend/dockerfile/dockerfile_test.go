@@ -213,6 +213,7 @@ var allTests = integration.TestFuncs(
 	testPlatformWithOSVersion,
 	testMaintainBaseOSVersion,
 	testTargetMistype,
+	testCopyCrossPlatformMultiStage,
 )
 
 // Tests that depend on the `security.*` entitlements
@@ -10435,6 +10436,69 @@ COPY --from=build C:\out C:\
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "target stage \"bulid\" could not be found (did you mean build?)")
+}
+
+func testCopyCrossPlatformMultiStage(t *testing.T, sb integration.Sandbox) {
+	// Cross-platform COPY requires bidirectional layer support (issue #4537).
+	// On a Linux host, this tests COPY --from a Windows stage into a Linux stage.
+	// On a Windows host, this tests COPY --from a Linux stage into a Windows stage.
+	f := getFrontend(t, sb)
+
+	dockerfile := []byte(integration.UnixOrWindows(
+		// Linux host: COPY from a Windows-platform stage into a Linux stage.
+		// The Windows stage uses --platform=windows/amd64 and the build context
+		// file is injected via local mount. The COPY crosses the OS boundary.
+		`
+FROM --platform=$BUILDPLATFORM busybox AS build
+RUN echo -n "cross-platform-data" > /out.txt
+
+FROM busybox
+COPY --from=build /out.txt /result.txt
+RUN [ "$(cat /result.txt)" = "cross-platform-data" ]
+`,
+		// Windows host: COPY from a Linux-platform stage into a Windows stage.
+		// The Linux stage uses a Linux base image. The COPY extracts files from
+		// the Linux layer (which uses Files/ prefix on Windows) into the
+		// Windows filesystem.
+		`
+FROM --platform=$BUILDPLATFORM nanoserver AS build
+USER ContainerAdministrator
+RUN echo cross-platform-data> C:\out.txt
+
+FROM nanoserver
+USER ContainerAdministrator
+COPY --from=build C:\out.txt C:\result.txt
+`,
+	))
+
+	dir := integration.Tmpdir(
+		t,
+		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+	)
+
+	c, err := client.New(sb.Context(), sb.Address())
+	require.NoError(t, err)
+	defer c.Close()
+
+	destDir := t.TempDir()
+
+	_, err = f.Solve(sb.Context(), c, client.SolveOpt{
+		Exports: []client.ExportEntry{
+			{
+				Type:      client.ExporterLocal,
+				OutputDir: destDir,
+			},
+		},
+		LocalMounts: map[string]fsutil.FS{
+			dockerui.DefaultLocalNameDockerfile: dir,
+			dockerui.DefaultLocalNameContext:    dir,
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	dt, err := os.ReadFile(filepath.Join(destDir, integration.UnixOrWindows("result.txt", "result.txt")))
+	require.NoError(t, err)
+	require.Contains(t, string(dt), "cross-platform-data")
 }
 
 func runShell(dir string, cmds ...string) error {
