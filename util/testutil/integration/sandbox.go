@@ -139,7 +139,7 @@ func newSandbox(ctx context.Context, t *testing.T, w Worker, mirror string, mv m
 			timeout *= 3
 		}
 		if runtime.GOOS == "windows" && runtime.GOARCH == "arm64" {
-			timeout *= 2
+			timeout *= 3
 		}
 		timeoutContext, cancelTimeout := context.WithTimeoutCause(ctx, timeout, errors.WithStack(context.DeadlineExceeded))
 		defer cancelTimeout()

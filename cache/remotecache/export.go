@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"syscall"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -241,7 +244,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 		MediaType: cacheimporttypes.CacheConfigMediaTypeV0,
 	}
 	configDone := progress.OneOff(ctx, fmt.Sprintf("writing config %s", dgst))
-	if err := content.WriteBlob(ctx, ce.ingester, dgst.String(), bytes.NewReader(dt), desc); err != nil {
+	if err := writeBlobWithRetry(ctx, ce.ingester, dgst.String(), dt, desc); err != nil {
 		return nil, configDone(errors.Wrap(err, "error writing config blob"))
 	}
 	configDone(nil)
@@ -265,7 +268,7 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 		mfstLog = fmt.Sprintf("writing cache image manifest %s", dgst)
 	}
 	mfstDone := progress.OneOff(ctx, mfstLog)
-	if err := content.WriteBlob(ctx, ce.ingester, dgst.String(), bytes.NewReader(dt), desc); err != nil {
+	if err := writeBlobWithRetry(ctx, ce.ingester, dgst.String(), dt, desc); err != nil {
 		return nil, mfstDone(errors.Wrap(err, "error writing manifest blob"))
 	}
 	descJSON, err := json.Marshal(desc)
@@ -276,4 +279,52 @@ func (ce *contentCacheExporter) Finalize(ctx context.Context) (map[string]string
 	mfstDone(nil)
 
 	return res, nil
+}
+
+// writeBlobWithRetry wraps content.WriteBlob with retry logic for transient
+// errors. On platforms with slower I/O (e.g. Windows ARM64), session-backed
+// content store operations can fail with context cancellation due to brief
+// gRPC transport interruptions. This retries the write with exponential
+// backoff (matching the pattern in util/resolver/retryhandler) to handle
+// such transient failures.
+func writeBlobWithRetry(ctx context.Context, cs content.Ingester, ref string, dt []byte, desc ocispecs.Descriptor) error {
+	backoff := time.Second
+	maxBackoff := 8 * time.Second
+	for {
+		err := content.WriteBlob(ctx, cs, ref, bytes.NewReader(dt), desc)
+		if err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		default:
+			if !retryWriteError(err) {
+				return err
+			}
+		}
+		if backoff >= maxBackoff {
+			return err
+		}
+		bklog.G(ctx).Debugf("retrying cache blob write in %v after error: %v", backoff, err)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+// retryWriteError returns true for errors that are considered transient
+// and worth retrying for cache blob writes. This includes context
+// cancellation from gRPC transport interruptions and common network errors.
+func retryWriteError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	return false
 }

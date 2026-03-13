@@ -782,7 +782,15 @@ func validateSourcePolicy(pol *spb.Policy) error {
 }
 
 func runCacheExporters(ctx context.Context, exporters []RemoteCacheExporter, j *solver.Job, cached *result.Result[solver.CachedResult], inp *result.Result[cache.ImmutableRef]) (map[string]string, error) {
-	eg, ctx := errgroup.WithContext(ctx)
+	// Use a context that won't be immediately canceled if the gRPC transport
+	// has a transient interruption. On platforms with slower I/O (e.g. Windows
+	// ARM64 with named pipes), the session gRPC stream can become unstable
+	// under heavy load, causing context cancellation that aborts in-flight
+	// cache export WriteBlob operations. A bounded detached context ensures
+	// the cache export has time to complete.
+	cacheCtx, cacheCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cacheCancel()
+	eg, ctx := errgroup.WithContext(cacheCtx)
 	g := session.NewGroup(j.SessionID)
 	resps := make([]map[string]string, len(exporters))
 	for i, exp := range exporters {
