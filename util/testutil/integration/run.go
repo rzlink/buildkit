@@ -577,6 +577,19 @@ func SkipOnPlatform(t *testing.T, goos string, reason ...string) {
 	}
 }
 
+// SkipOnPlatformArch skips the test if runtime.GOOS and runtime.GOARCH
+// match the given values.
+func SkipOnPlatformArch(t *testing.T, goos, goarch string, reason ...string) {
+	t.Helper()
+	if runtime.GOOS == goos && runtime.GOARCH == goarch {
+		if len(reason) > 0 {
+			t.Skipf("Skipped on %s/%s: %s", goos, goarch, strings.Join(reason, " "))
+		} else {
+			t.Skipf("Skipped on %s/%s", goos, goarch)
+		}
+	}
+}
+
 // Selects between two types, returns second
 // argument if on Windows or else first argument.
 // Typically used for selecting test cases.

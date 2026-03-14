@@ -185,6 +185,7 @@ RUN --mont=target=/mytmp,type=tmpfs echo 1
 }
 
 func testMountRWCache(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(

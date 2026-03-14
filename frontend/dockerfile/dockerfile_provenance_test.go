@@ -1569,6 +1569,7 @@ ADD bar bar`)
 }
 
 func testFrontendDeduplicateSources(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())

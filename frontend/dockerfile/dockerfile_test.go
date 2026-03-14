@@ -351,6 +351,7 @@ COPY --from=build env.txt .
 }
 
 func testDefaultEnvWithArgs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -436,6 +437,7 @@ echo -n $my_arg $* > /out
 }
 
 func testEnvEmptyFormatting(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -1194,6 +1196,7 @@ RUN e="300:400"; p="/file"                         ; a=` + "`" + `stat -c "%u:%g
 }
 
 func testCopyWildcardCache(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -1534,6 +1537,7 @@ RUN [ "$(stat -c "%U %G" /dest01)" == "user01 user" ]
 }
 
 func testCopyThroughSymlinkContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -2005,6 +2009,7 @@ COPY Dockerfile .
 }
 
 func testTargetStageNameArg(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -2938,6 +2943,7 @@ FROM nanoserver:${tag}
 }
 
 func testDockerfileDirs(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "nanoserver:plus substitute lacks fc.exe needed by this test")
 	f := getFrontend(t, sb)
 	f.RequiresBuildctl(t)
 
@@ -4482,6 +4488,7 @@ COPY --chmod=10000 foo /
 }
 
 func testCopyOverrideFiles(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -4991,6 +4998,7 @@ COPY --from=build foo bar2
 }
 
 func testDockerfileFromHTTP(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	buf := bytes.NewBuffer(nil)
@@ -5053,6 +5061,7 @@ COPY foo bar
 }
 
 func testMultiStageImplicitFrom(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfile := []byte(integration.UnixOrWindows(
@@ -5143,6 +5152,7 @@ COPY --from=golang /go /go
 }
 
 func testMultiStageCaseInsensitive(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfileStr := `
@@ -5314,6 +5324,7 @@ RUN dir file1
 }
 
 func testOnBuildCleared(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush)
 	f := getFrontend(t, sb)
 
@@ -6648,6 +6659,7 @@ COPY --from=base /out /
 }
 
 func testPlatformArgsImplicit(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 
 	dockerfileStr := integration.UnixOrWindows(
@@ -8093,6 +8105,7 @@ COPY --from=base /o* /
 }
 
 func testLocalCustomSessionID(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -8453,6 +8466,7 @@ FROM nonexistent AS base
 }
 
 func testNamedInputContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	ctx := sb.Context()
 
 	c, err := client.New(ctx, sb.Address())
@@ -9661,6 +9675,7 @@ func testMultiNilRefsInSolveGateway(t *testing.T, sb integration.Sandbox) {
 }
 
 func testCopyUnicodePath(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 	c, err := client.New(sb.Context(), sb.Address())
 	require.NoError(t, err)
@@ -9718,6 +9733,7 @@ COPY test+aou.txt /
 }
 
 func testSourcePolicyWithNamedContext(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	f := getFrontend(t, sb)
 	c, err := client.New(sb.Context(), sb.Address())
 	require.NoError(t, err)

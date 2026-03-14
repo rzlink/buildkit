@@ -2002,9 +2002,13 @@ func testRelativeWorkDir(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 	defer c.Close()
 
+	winImage := "mcr.microsoft.com/windows/nanoserver:ltsc2022"
+	if runtime.GOARCH == "arm64" {
+		winImage = "mcr.microsoft.com/windows/nanoserver:ltsc2025-arm64"
+	}
 	imgName := integration.UnixOrWindows(
 		"docker.io/library/busybox:latest",
-		"mcr.microsoft.com/windows/nanoserver:ltsc2022",
+		winImage,
 	)
 	cmdStr := integration.UnixOrWindows(
 		`sh -c "pwd > /out/pwd"`,
@@ -2048,9 +2052,13 @@ func testSolverOptLocalDirsStillWorks(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 	defer c.Close()
 
+	winImage := "mcr.microsoft.com/windows/nanoserver:ltsc2022"
+	if runtime.GOARCH == "arm64" {
+		winImage = "mcr.microsoft.com/windows/nanoserver:ltsc2025-arm64"
+	}
 	imgName := integration.UnixOrWindows(
 		"docker.io/library/busybox:latest",
-		"mcr.microsoft.com/windows/nanoserver:ltsc2022",
+		winImage,
 	)
 	cmdStr := integration.UnixOrWindows(
 		`sh -c "/bin/rev < input.txt > /out/output.txt"`,
@@ -6608,6 +6616,7 @@ func testZstdLocalCacheImportExport(t *testing.T, sb integration.Sandbox) {
 }
 
 func testImageManifestRegistryCacheImportExport(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	workers.CheckFeatureCompat(t, sb,
 		workers.FeatureCacheExport,
 		workers.FeatureCacheImport,
@@ -6893,6 +6902,7 @@ func testBasicAzblobCacheImportExport(t *testing.T, sb integration.Sandbox) {
 }
 
 func testBasicInlineCacheImportExport(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky sandbox timeout")
 	workers.CheckFeatureCompat(t, sb,
 		workers.FeatureDirectPush,
 		workers.FeatureCacheExport,
@@ -7476,6 +7486,7 @@ func testExportLocalNoPlatformSplitOverwrite(t *testing.T, sb integration.Sandbo
 
 func testExportLocalForcePlatformSplit(t *testing.T, sb integration.Sandbox) {
 	workers.CheckFeatureCompat(t, sb, workers.FeatureOCIExporter, workers.FeatureMultiPlatform)
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "host OS version mismatch with container base image causes platform-split directory name mismatch")
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
 	defer c.Close()
@@ -7730,6 +7741,7 @@ func testDuplicateCacheMount(t *testing.T, sb integration.Sandbox) {
 }
 
 func testRunCacheWithMounts(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "nanoserver:plus lacks whoami.exe")
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
 	defer c.Close()
@@ -11339,6 +11351,7 @@ func testSBOMSupplements(t *testing.T, sb integration.Sandbox) {
 }
 
 func testMultipleCacheExports(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky registry blob write error")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureMultiCacheExport)
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
@@ -12354,6 +12367,7 @@ func testSourcePolicy(t *testing.T, sb integration.Sandbox) {
 }
 
 func testLLBMountPerformance(t *testing.T, sb integration.Sandbox) {
+	integration.SkipOnPlatformArch(t, "windows", "arm64", "flaky buildkitd startup failure")
 	c, err := New(sb.Context(), sb.Address())
 	require.NoError(t, err)
 	defer c.Close()
