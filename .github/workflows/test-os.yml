@@ -309,6 +309,60 @@ jobs:
               "-covermode" "atomic" ${{ env.TESTFLAGS }}
         shell: bash
       -
+        name: Test summary
+        if: always()
+        run: |
+          python3 -c "
+          import json, os, sys
+          report = os.path.join('bin', 'testreports', 'go-test-report-${{ env.TEST_REPORT_NAME }}.json')
+          if not os.path.exists(report):
+              print('No test report found')
+              sys.exit(0)
+          tests = {}
+          with open(report, encoding='utf-8') as f:
+              for line in f:
+                  e = json.loads(line)
+                  if e.get('Test') and e.get('Action') in ('pass','fail','skip') and e.get('Elapsed') is not None:
+                      tests[e['Test']] = {'action': e['Action'], 'elapsed': e['Elapsed']}
+          if not tests:
+              sys.exit(0)
+          out = os.environ.get('GITHUB_STEP_SUMMARY', '')
+          if not out:
+              sys.exit(0)
+          with open(out, 'a', encoding='utf-8') as f:
+              f.write('### Test Results\n\n')
+              passed = sum(1 for t in tests.values() if t['action']=='pass')
+              failed = sum(1 for t in tests.values() if t['action']=='fail')
+              skipped = sum(1 for t in tests.values() if t['action']=='skip')
+              f.write(f'✅ {passed} passed, ❌ {failed} failed, ⏭️ {skipped} skipped\n\n')
+              slow = [(n,t) for n,t in tests.items() if t['action'] in ('pass','fail') and t['elapsed'] >= 5]
+              def parse_name(name):
+                  parts = name.split('/')
+                  tn = next((p for p in parts if '=' not in p and p != 'TestIntegration'), name)
+                  kvs = [p for p in parts if '=' in p and not p.startswith('slice=')]
+                  return tn, ', '.join(kvs) if kvs else ''
+              if slow:
+                  f.write('<details><summary>Tests ≥ 5s (sorted by duration)</summary>\n\n')
+                  f.write('| Status | Duration | Test | Instance |\n|--------|----------|------|----------|\n')
+                  for name, t in sorted(slow, key=lambda x: -x[1]['elapsed']):
+                      icon = '✅' if t['action']=='pass' else '❌'
+                      m, s = divmod(t['elapsed'], 60)
+                      dur = f'{int(m)}m{s:.0f}s' if m else f\"{t['elapsed']:.1f}s\"
+                      tn, inst = parse_name(name)
+                      f.write(f'| {icon} | {dur} | {tn} | {inst} |\n')
+                  f.write('\n</details>\n')
+              if failed:
+                  f.write('\n**Failed tests:**\n')
+                  for name, t in tests.items():
+                      if t['action']=='fail':
+                          m, s = divmod(t['elapsed'], 60)
+                          dur = f'{int(m)}m{s:.0f}s' if m else f\"{t['elapsed']:.1f}s\"
+                          tn, inst = parse_name(name)
+                          inst_str = f' ({inst})' if inst else ''
+                          f.write(f'- ❌ **{tn}**{inst_str} ({dur})\n')
+          "
+        shell: bash
+      -
         name: Send to Codecov
         if: always()
         uses: codecov/codecov-action@v5
