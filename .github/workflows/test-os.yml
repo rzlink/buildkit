@@ -212,6 +212,7 @@ jobs:
 
   test-windows-arm64:
     runs-on: [self-hosted, windows-arm64-selfhosted]
+    timeout-minutes: 120
     needs:
       - build
     env:
