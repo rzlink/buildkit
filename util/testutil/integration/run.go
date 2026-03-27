@@ -36,7 +36,11 @@ import (
 var sandboxLimiter *semaphore.Weighted
 
 func init() {
-	sandboxLimiter = semaphore.NewWeighted(int64(runtime.GOMAXPROCS(0)))
+	limit := int64(runtime.GOMAXPROCS(0))
+	if runtime.GOOS == "windows" {
+		limit = 2 // conservative: HCS layer contention risk
+	}
+	sandboxLimiter = semaphore.NewWeighted(limit)
 }
 
 // Backend is the minimal interface that describes a testing backend.
@@ -225,9 +229,10 @@ func Run(t *testing.T, testCases []Test, opt ...TestOpt) {
 							t.Skip("rootless")
 						}
 						ctx := appcontext.Context()
-						// TODO(profnandaa): to revisit this to allow tests run
-						// in parallel on Windows in a stable way. Is flaky currently.
-						if !strings.HasSuffix(fn, "NoParallel") && runtime.GOOS != "windows" {
+						// Allow parallel execution on all platforms.
+						// On Windows, sandboxLimiter caps concurrency to 2
+						// to reduce HCS layer contention risk.
+						if !strings.HasSuffix(fn, "NoParallel") {
 							t.Parallel()
 						}
 						require.NoError(t, sandboxLimiter.Acquire(context.TODO(), 1))
