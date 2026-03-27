@@ -109,7 +109,7 @@ All 3 previously-skipped ARM64 tests have been fixed (0 remaining):
 GitHub org won't work. Automation runs locally via `az` CLI + `gh` CLI. Future option:
 Azure Function with managed identity for fully automated webhook-driven scaling.
 
-### Phase 2: Enable t.Parallel() on Windows
+### Phase 2: Enable t.Parallel() on Windows — ⏸ Paused (HCS kernel limitation)
 
 **Goal:** Run test subtests in parallel within each shard to reduce total execution time
 and VM count.
@@ -119,21 +119,58 @@ and VM count.
 Each shard runs subtests sequentially. Enabling parallelism could halve execution time
 and allow reducing from 10 VMs to 4-5.
 
-**Investigation needed:**
-1. Why was `t.Parallel()` disabled? Named pipe contention, HCS container overhead
-   under parallel load, and Windows file locking/sharing violations during cleanup.
-   See [`windows-parallel-tests.md`](windows-parallel-tests.md) for detailed HCS
-   contention analysis.
-2. Which tests share state? (container images, network ports, temp directories)
-3. Can isolation be added? (unique temp dirs, dynamic port allocation, per-test containerd)
+**Investigation results:**
 
-**Approach:**
-1. Start with `GOMAXPROCS=2` to limit concurrency — minimal change
-2. Monitor for flaky failures over several CI runs
-3. Increase parallelism gradually as stability is confirmed
-4. Reduce VM count once parallel execution is stable
+We ran a proof-of-concept on AMD64 (`feature/windows-parallel-tests` branch, run
+#23658562428) with `t.Parallel()` enabled and `sandboxLimiter=2` (only 2 concurrent
+sandboxes). Result: **4 of 21 jobs failed** with HCS errors, while the same tests pass
+100% on sequential master.
 
-**Expected impact:** ~2× speedup, VM count reduction from 10 to 4-5 (cost savings ~50%)
+Failed tests and their HCS errors:
+- **TestWorkdirCreatesDir** — `hcsshim::ProcessUtilityVMImage: Incorrect function`
+- **TestCopyParentsMissingDirectory** (2 instances) — `hcs::System::Start: virtual
+  machine or container exited unexpectedly` + `ProcessUtilityVMImage: Incorrect function`
+- **TestCopyThroughSymlinkContext** — `ProcessUtilityVMImage: Incorrect function`
+- **TestCopyIgnoredFiles** — `GetFileAttributesEx \foobar: system cannot find the file`
+
+**Root cause: Windows HCS kernel limitation.**
+
+The Windows Host Compute Service (HCS) layer operations (`ActivateLayer`,
+`ProcessUtilityVMImage`, `System::Start`) are **direct syscalls to `vmcompute.dll`** and
+are not safe for concurrent invocation. This is a known, long-standing issue:
+
+- [microsoft/hcsshim#2294](https://github.com/microsoft/hcsshim/issues/2294) — "Failure
+  on image pull: UtilityVM: Incorrect function" (Oct 2024, **open**, no fix). Exact same
+  error we hit. nerdctl CI sees it "quite often" — Microsoft tried to reproduce locally
+  but could not.
+- [microsoft/hcsshim#801](https://github.com/microsoft/hcsshim/issues/801) — "Failed to
+  start container, context deadline exceeded" (Apr 2020, **open**, 6 years, 7 upvotes).
+  Starting ~15 containers in parallel → `System::Start` failures.
+- [containerd/nerdctl#3524](https://github.com/containerd/nerdctl/issues/3524) — Windows
+  `UtilityVM: Incorrect function` on pull (Oct 2024, **open**). Works around it by marking
+  tests as flaky.
+- [moby/buildkit#5800](https://github.com/moby/buildkit/issues/5800) — @tonistiigi: "WCOW
+  tests are more flaky than Linux tests." Solved by splitting into more CI shards (not by
+  enabling t.Parallel()).
+- [moby/buildkit#4485](https://github.com/moby/buildkit/issues/4485) — The tracking issue
+  for Windows test enablement. `--parallel` gotestsum listed as a todo but never done.
+
+In hcsshim, `PrepareLayer` has a process-local mutex as a workaround, but `ActivateLayer`
+has **no serialization at all**. Even the `PrepareLayer` mutex is per-process — BuildKit
+tests run separate containerd instances per sandbox, so it provides no cross-process
+protection. Fixing this requires a **Windows OS update** to `vmcompute.dll`, not just a
+hcsshim code change.
+
+**No public Microsoft roadmap or commitment** to fix HCS concurrency exists as of 2025.
+
+**Options if revisited:**
+1. `sandboxLimiter=1` — enables t.Parallel() scheduling but no actual concurrency. Minimal
+   benefit (test overhead reordering only).
+2. Add HCS retry/serialization in BuildKit's own layer — would require changes upstream.
+3. Wait for a Windows OS update that fixes `vmcompute.dll` concurrency.
+
+See [`windows-parallel-tests.md`](windows-parallel-tests.md) for detailed HCS contention
+analysis.
 
 ### Phase 3: Fix 3 Deterministic ARM64 Failures ✅ Done
 
@@ -193,7 +230,7 @@ Fix: add `Normalize()` to the expected value.
 | ~~Baseline~~ | Partner runner, 18 skipped | 18 | ~87% | ~47 min | 1 (partner) | Done |
 | ~~Self-hosted~~ | 10 Azure Cobalt 100 runners | 3 | 100% | ~40 min | 10 | Done |
 | ~~Phase 1~~ | VMSS ephemeral runners + run-ci.sh | 3 | 100% | ~40 min | 9–12 (VMSS) | ✅ Done |
-| Phase 2 | Enable t.Parallel() | 0 | 100% | ~20 min | 4-5 | Planned |
+| ~~Phase 2~~ | Enable t.Parallel() | 0 | 80% (HCS) | — | — | ⏸ Paused |
 | ~~Phase 3~~ | Fix deterministic failures | 0 | 100% | ~42 min | 12 (VMSS) | ✅ Done |
 | Phase 4 | Official GitHub ARM64 runner | 0 | 100% | ~17-20 min | 0 (GitHub-hosted) | Future |
 
@@ -236,3 +273,4 @@ Fix: add `Normalize()` to the expected value.
 | #23623604620 | 2026-03-26 | 27/27, 3 failed | D4plds_v6 (8GB fallback). 2 test failures + 1 infra (Go setup). Memory-related |
 | #23631236436 | 2026-03-27 | **27/27 ✅** | D4ps_v6 (16GB fallback). **0 skipped, 763 pass, 0 fail**. Full E2E with Teams notification |
 | #23654934513 | 2026-03-27 | Build failed | Cron run. GitHub Actions infra issue ("Set up Docker Buildx"). Not code-related |
+| #23658562428 | 2026-03-27 | 17/21 ❌ | **Parallel test POC** (AMD64, `feature/windows-parallel-tests`). t.Parallel() + sandboxLimiter=2. 4 HCS failures — confirmed HCS kernel limitation |
