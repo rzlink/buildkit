@@ -125,7 +125,7 @@ jobs:
             testSliceOffset="slice=$testSlice/"
           fi
           if [ -n "${{ matrix.worker }}" ]; then
-            testFlags="${testFlags} --run=TestIntegration/$testSliceOffset.*/worker=${{ matrix.worker }}"
+            testFlags="${testFlags} --run=/$testSliceOffset.*/worker=${{ matrix.worker }}"
           fi
           echo "TESTFLAGS=${testFlags}" >> $GITHUB_ENV
         shell: bash
