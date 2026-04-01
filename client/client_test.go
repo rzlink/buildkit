@@ -2097,9 +2097,13 @@ func testRelativeWorkDir(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 	defer c.Close()
 
+	winImage := "mcr.microsoft.com/windows/nanoserver:ltsc2022"
+	if runtime.GOARCH == "arm64" {
+		winImage = "mcr.microsoft.com/windows/nanoserver:ltsc2025-arm64"
+	}
 	imgName := integration.UnixOrWindows(
 		"docker.io/library/busybox:latest",
-		"mcr.microsoft.com/windows/nanoserver:ltsc2022",
+		winImage,
 	)
 	cmdStr := integration.UnixOrWindows(
 		`sh -c "pwd > /out/pwd"`,
@@ -2143,9 +2147,13 @@ func testSolverOptLocalDirsStillWorks(t *testing.T, sb integration.Sandbox) {
 	require.NoError(t, err)
 	defer c.Close()
 
+	winImage := "mcr.microsoft.com/windows/nanoserver:ltsc2022"
+	if runtime.GOARCH == "arm64" {
+		winImage = "mcr.microsoft.com/windows/nanoserver:ltsc2025-arm64"
+	}
 	imgName := integration.UnixOrWindows(
 		"docker.io/library/busybox:latest",
-		"mcr.microsoft.com/windows/nanoserver:ltsc2022",
+		winImage,
 	)
 	cmdStr := integration.UnixOrWindows(
 		`sh -c "/bin/rev < input.txt > /out/output.txt"`,
