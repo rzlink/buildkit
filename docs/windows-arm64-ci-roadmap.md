@@ -4,7 +4,7 @@ This document tracks the Windows ARM64 CI test status, infrastructure decisions,
 and roadmap for achieving full test parity with x64. Use this for planning and
 manager discussions.
 
-**Last updated**: 2026-03-20
+**Last updated**: 2026-03-27
 **Branch**: `ci/windows-arm64-azure-testing`
 **CI Workflow**: `.github/workflows/test-os.yml` → `test-windows-arm64` job
 
@@ -13,30 +13,46 @@ manager discussions.
 ## Current State
 
 ### Infrastructure
-- **10 self-hosted Azure Cobalt 100 ARM64 runners** (Dpdsv6-series, NVMe storage)
-- Runners: 1× D8pds_v6 (8 vCPU, 32GB) + 9× D4pds_v6 (4 vCPU, 16GB)
-- Region: eastus2, Resource group: `buildkit-arm64-runner-rg`
-- Runners connect outbound to GitHub; labeled `windows-arm64-selfhosted`
-- Cost: ~$2.11/hr total (~$50/day if running 24/7)
+- **Azure VMSS** (`arm64-runner-ss`) with scale-to-zero ephemeral runners
+  - SKU: Standard_D4pds_v6 (4 vCPU, 16GB, Cobalt 100 ARM64) with automatic failover
+  - Failover SKUs: D4ps_v6 (16GB) → D4pds_v5 (16GB) → D4plds_v6 (8GB)
+  - Golden image: `bkarm64gallery/bk-arm64-runner/1.0.0` (Windows Server 2025 ARM64)
+  - Region: eastus2, Resource group: `buildkit-arm64-runner-rg`
+  - Runners labeled `windows-arm64-selfhosted`, register via `--ephemeral` flag
+  - Re-registration loop: after each job completes, runner re-configures and picks up the next job
+  - Cost: **$0 at idle** (scale to 0 between runs); ~$2/hr when running 12 instances
+- **Automation**: `infra/vmss/run-ci.sh` — local CLI wrapper that scales up VMSS, dispatches
+  workflow, polls completion, sends Teams notification, and scales back to 0.
+  - SKU failover: `SkuNotAvailable` triggers immediate fallback (no retry); transient errors retry 3×
+  - Signal trap guarantees scale-down on Ctrl+C/errors
+  - Per-platform test result parsing from artifacts
+  - Teams Adaptive Card notification with per-platform breakdown
+- **Cron automation**:
+  - Weekdays 15:45 UTC: `run-ci.sh --arm64-only` (daily CI)
+  - Sundays 06:00 UTC: `patch-golden-image.sh` (weekly security patching)
+- **Blob storage** (`bkarm64scripts`): `startup.ps1` (CSE entry point) + `runner-loop.ps1`
+  (ephemeral re-registration loop). VMSS Custom Script Extension downloads and executes on boot.
 
 ### Test Results
 
 | Metric | x64 (windows-2022) | ARM64 (self-hosted) |
 |--------|---------------------|---------------------|
-| Runner | GitHub-hosted, 8+ vCPU | Self-hosted, 10 VMs, Cobalt 100 |
-| Wall clock | **~17 min** | **~40 min** (with 10 runners) |
-| Pass rate | 100% | **100%** (Run #23330129616) |
-| Skipped tests | 0 | **3** (deterministic ARM64 issues) |
+| Runner | GitHub-hosted, 8+ vCPU | Self-hosted, VMSS ephemeral, Cobalt 100 |
+| Wall clock | **~17 min** | **~42 min** (with 12 runners) |
+| Pass rate | 100% | **100%** (Run #23631236436) |
+| Skipped tests | 0 | **0** |
 | Parallel tests | No (sequential) | No (sequential) |
 | Sandbox timeout | 5 min | 15 min (5 min × 3× ARM64 multiplier) |
 
-### Skip Summary (3 remaining)
+### Skip Summary
 
-| Test | Category | Root Cause | Fix Path |
-|------|----------|-----------|----------|
-| TestDockerfileDirs | Missing tool | `nanoserver:plus` ARM64 substitute lacks `fc.exe` | Build ARM64 wintools image |
-| TestRunCacheWithMounts | Missing tool | `nanoserver:plus` ARM64 substitute lacks `whoami.exe` | Build ARM64 wintools image |
-| TestExportLocalForcePlatformSplit | OS version | Host/container OS version mismatch in platform-split directory naming | Test fix |
+All 3 previously-skipped ARM64 tests have been fixed (0 remaining):
+
+| Test | Root Cause | Fix Applied |
+|------|-----------|-------------|
+| TestDockerfileDirs | `fc.exe` missing in nanoserver ARM64 | Use `findstr` instead of `fc /b` for content verification |
+| TestRunCacheWithMounts | `whoami.exe` missing in nanoserver ARM64; `nanoserver:plus` maps to same image as `nanoserver:latest` on ARM64 | Create marker file via build step instead of checking pre-existing binary |
+| TestExportLocalForcePlatformSplit | `platforms.Normalize()` adds `v8` variant on ARM64, causing directory name mismatch | Add `Normalize()` to expected platform string to match exporter behavior |
 
 ### What was resolved
 
@@ -65,32 +81,33 @@ manager discussions.
 
 ## Roadmap
 
-### Phase 1: Ephemeral Runner Support
+### Phase 1: Ephemeral Runner Support ✅ Done
 
-**Goal:** Clean test environments — destroy/re-provision VM after each job run (like GitHub-hosted runners).
+**Deployed:** Azure VMSS with scale-to-zero ephemeral runners.
 
-**Why:** Current runners are persistent. State accumulates between jobs (cached container
-images, temp files, registry entries). This could cause subtle test pollution. GitHub-hosted
-and partner runners destroy the VM after each job for isolation.
+**Architecture:**
+- **VMSS** (`arm64-runner-ss`): Scale Set with golden image, boots fresh instances per run
+- **`--ephemeral` + re-registration loop**: Each runner exits after one job, then
+  `runner-loop.ps1` re-configures and picks up the next job from the queue. This means
+  N runners can handle M>N jobs without needing M instances.
+- **Custom Script Extension**: On boot, `startup.ps1` downloads `runner-loop.ps1` from
+  blob storage and starts it as a background process
+- **`run-ci.sh` wrapper**: Automates the full cycle — scale up → wait for runners →
+  dispatch → poll → scale down. Signal trap guarantees scale-down on Ctrl+C/errors.
+- **Key Vault** (`bk-arm64-kv`): Stores GitHub PAT for runner registration tokens
 
-**Options (all work with current MS-internal Azure subscription unless noted):**
+**Key learnings during deployment:**
+- PowerShell here-string encoding: Non-ASCII characters (em dashes, arrows) get garbled
+  through the UTF-8 → BOM → CSE pipeline. Solution: keep all scripts ASCII-only and
+  download from blob storage instead of embedding in here-strings.
+- CSE caching: When blob content changes but URI stays the same, some instances use
+  cached scripts. Fix: `az vmss extension set --force-update`.
+- VNET dependency: VMSS references VNET by resource ID. If VNET is deleted, scale
+  operations fail. Recreate with exact same name before scaling.
 
-| Option | Approach | Azure Sub | Complexity | Notes |
-|--------|----------|-----------|------------|-------|
-| A | **Azure Automation / Logic Apps** — event-driven: watch runner completion, deallocate VM, re-provision from golden image | MS-internal ✅ | Medium | Native Azure solution, no external dependencies |
-| B | **VM Scale Sets + golden image** — auto-scaling pool with `--ephemeral` runners | MS-internal ✅ | Medium | Best for scaling up/down with demand |
-| C | **GitHub Actions workflow job** — pre/post jobs call Azure API to start/stop VMs via Azure SP + OIDC | Non-MS only ❌ | Low | Simplest code, but MS-internal sub can't expose SP to GitHub Actions |
-| D | **Cron script on management VM** — polling script monitors runner state, restarts after each job | MS-internal ✅ | Low | Simplest, but fragile; single point of failure |
-
-**Runner `--ephemeral` flag:** Register runner with `./config.cmd --ephemeral` so it
-automatically exits after completing one job. Combined with automation above, the workflow becomes:
-1. Job queued → automation starts a fresh VM from golden image
-2. Runner registers, picks up job, executes
-3. Runner exits → automation deallocates VM
-4. Next job → repeat
-
-**Golden image contents:** Windows Server 2025 ARM64, Containers feature enabled, HCS service
-running, Developer Mode enabled, Git, Go, Node.js, Python, GitHub Actions runner agent.
+**Constraint:** Azure subscription is Microsoft-internal — `azure/login` from non-MS
+GitHub org won't work. Automation runs locally via `az` CLI + `gh` CLI. Future option:
+Azure Function with managed identity for fully automated webhook-driven scaling.
 
 ### Phase 2: Enable t.Parallel() on Windows
 
@@ -118,23 +135,25 @@ and allow reducing from 10 VMs to 4-5.
 
 **Expected impact:** ~2× speedup, VM count reduction from 10 to 4-5 (cost savings ~50%)
 
-### Phase 3: Fix 3 Deterministic ARM64 Failures
+### Phase 3: Fix 3 Deterministic ARM64 Failures ✅ Done
 
-**Goal:** Zero skipped ARM64 tests.
+**All 3 tests fixed** — zero skipped ARM64 tests. Fixes are in the `ci: add Windows
+ARM64 test support` commit, validated in run #23631236436 (763 passed, 0 failed).
 
-**3a: Build ARM64 wintools/nanoserver image** (fixes TestDockerfileDirs, TestRunCacheWithMounts)
-- On x64, `nanoserver:plus` → `docker.io/wintools/nanoserver:ltsc2022` (custom image with fc.exe, etc.)
-- On ARM64, no wintools ARM64 build exists → falls back to plain `nanoserver:ltsc2025-arm64`
-- Plain nanoserver is minimal and lacks fc.exe, whoami.exe
-- **Host VM has both tools** at `C:\Windows\System32` — the issue is only inside containers
-- Upstream PR: https://github.com/microsoft/windows-container-tools/pull/178
-- Action: Build ARM64 variant, push to `wintools/nanoserver:ltsc2025-arm64`, update image map
+**3a: TestDockerfileDirs** — replaced `fc /b` with `findstr /M` for content verification.
+`fc.exe` is not included in nanoserver (only available in Server Core / full Windows).
+`findstr` is available in all Windows editions including nanoserver.
 
-**3b: Fix OS version mismatch** (fixes TestExportLocalForcePlatformSplit)
-- Test exports with `platform-split: true`, creating directories named by OS version
-- Host is Windows 26100 (ltsc2025), container image has its own version string
-- Directory naming expectation doesn't account for ARM64 version differences
-- Likely a test fix to accept the ARM64 platform string
+**3b: TestRunCacheWithMounts** — on ARM64, `nanoserver:plus` maps to the same image as
+`nanoserver:latest` (no ARM64 wintools image exists), and neither contains `whoami.exe`.
+Fix: create a marker file via an LLB build step on the mounted image, then check for
+that marker instead of relying on pre-existing binary differences. Also switched to
+forward slashes in paths (`C:/m1/marker`) for `llb.Shlex()` compatibility.
+
+**3c: TestExportLocalForcePlatformSplit** — the local exporter runs platform through
+`platforms.Normalize()` which adds the `v8` variant on ARM64 (`windows/arm64` →
+`windows/arm64/v8`). The test was comparing against the un-normalized platform string.
+Fix: add `Normalize()` to the expected value.
 
 ### Phase 4: Official GitHub ARM64 Runner Support
 
@@ -172,10 +191,10 @@ and allow reducing from 10 VMs to 4-5.
 | Phase | Action | Skipped | Pass Rate | Wall Clock | VMs | Status |
 |-------|--------|---------|-----------|-----------|-----|--------|
 | ~~Baseline~~ | Partner runner, 18 skipped | 18 | ~87% | ~47 min | 1 (partner) | Done |
-| ~~Self-hosted~~ | 10 Azure Cobalt 100 runners | 3 | 100% | ~40 min | 10 | ✅ Done |
-| Phase 1 | Ephemeral runners | 3 | 100% | ~40 min | 10 | Planned |
-| Phase 2 | Enable t.Parallel() | 3 | 100% | ~20 min | 4-5 | Planned |
-| Phase 3 | Fix deterministic failures | 0 | 100% | ~20 min | 4-5 | Planned |
+| ~~Self-hosted~~ | 10 Azure Cobalt 100 runners | 3 | 100% | ~40 min | 10 | Done |
+| ~~Phase 1~~ | VMSS ephemeral runners + run-ci.sh | 3 | 100% | ~40 min | 9–12 (VMSS) | ✅ Done |
+| Phase 2 | Enable t.Parallel() | 0 | 100% | ~20 min | 4-5 | Planned |
+| ~~Phase 3~~ | Fix deterministic failures | 0 | 100% | ~42 min | 12 (VMSS) | ✅ Done |
 | Phase 4 | Official GitHub ARM64 runner | 0 | 100% | ~17-20 min | 0 (GitHub-hosted) | Future |
 
 ---
@@ -185,6 +204,12 @@ and allow reducing from 10 VMs to 4-5.
 | File | Purpose |
 |------|---------|
 | `.github/workflows/test-os.yml` | CI workflow — `test-windows-arm64` job, `arm64_only` + `arm64_test_filter` inputs |
+| `infra/vmss/run-ci.sh` | Automated CI: sync → scale VMSS → dispatch → poll → parse results → Teams notify → scale down. SKU failover, `set -e` safe |
+| `infra/vmss/patch-golden-image.sh` | Weekly golden image security patching: boot temp VM, Windows Update, update toolchain, sysprep, capture, cleanup |
+| `infra/vmss/startup.ps1` | VMSS Custom Script Extension entry point. Downloads runner-loop.ps1 from blob, starts loop |
+| `infra/vmss/runner-loop.ps1` | Ephemeral runner re-registration loop: config → run → repeat. Also in blob storage |
+| `infra/vmss/deploy-vmss.sh` | Reference script for VMSS + Key Vault deployment |
+| `infra/vmss/create-golden-image.sh` | Script to build golden VM image (Win Server 2025 ARM64 + toolchain) |
 | `util/testutil/integration/run.go` | `SkipOnPlatformArch()` helper, `t.Parallel()` disabled on Windows (line 229) |
 | `util/testutil/integration/sandbox.go` | ARM64 timeout multiplier 3× (line 141) |
 | `util/testutil/integration/util_windows.go` | ARM64 image auto-detection, nanoserver:plus → nanoserver:ltsc2025-arm64 fallback |
@@ -205,3 +230,9 @@ and allow reducing from 10 VMs to 4-5.
 | #23330129616 | 2026-03-20 | **24/24 ✅** | Full suite after squash+rebase, 5 deterministic skips |
 | #23331467831 | 2026-03-20 | **21/24 ❌** | Experiment: unskipped 5 deterministic tests (filtered). 2 passed (ACL), 3 failed (fc.exe, whoami.exe, OS version) |
 | #23331967051 | 2026-03-20 | **23/24 ❌** | Full suite, 3 skips. 1 flaky failure: hcsshim ActivateLayer ERROR_SHARING_VIOLATION (0x20) |
+| #23447461738 | 2026-03-22 | **26/27 ✅** | First VMSS run (12 instances). 1 infra failure (runner transition). Runner loop deployed mid-run |
+| #23453914389 | 2026-03-22 | **27/27 ✅** | Full VMSS validation via `run-ci.sh`. 9 runners handled all 21 ARM64 shards via re-registration |
+| #23573978181 | 2026-03-26 | **27/27 ✅** | D4pds_v6 (16GB). All tests pass including cache import/export |
+| #23623604620 | 2026-03-26 | 27/27, 3 failed | D4plds_v6 (8GB fallback). 2 test failures + 1 infra (Go setup). Memory-related |
+| #23631236436 | 2026-03-27 | **27/27 ✅** | D4ps_v6 (16GB fallback). **0 skipped, 763 pass, 0 fail**. Full E2E with Teams notification |
+| #23654934513 | 2026-03-27 | Build failed | Cron run. GitHub Actions infra issue ("Set up Docker Buildx"). Not code-related |
