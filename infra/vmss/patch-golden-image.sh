@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # patch-golden-image.sh — Weekly security patching for the ARM64 runner golden image.
 #
-# Boots a temporary VM from the current golden image, applies Windows Updates,
-# updates installed toolchains to latest versions, syspreps, and captures a new
-# dated image. Updates the VMSS model and cleans up old images (keeps last 2).
+# Boots a temporary VM from the current golden image (stored in a Shared Image
+# Gallery), applies Windows Updates, updates installed toolchains to latest
+# versions, syspreps, and captures a new gallery image version. Updates the VMSS
+# model and cleans up old versions (keeps last 2).
 #
 # Prerequisites:
 #   - Azure CLI authenticated
-#   - Existing golden image 'bk-arm64-runner-image' in the resource group
+#   - Shared Image Gallery 'bkarm64gallery' with image definition 'bk-arm64-runner'
 #
 # Usage:
 #   ./patch-golden-image.sh [--sku SKU] [--notify WEBHOOK_URL] [--dry-run]
@@ -25,11 +26,11 @@ LOCATION="eastus2"
 VM_NAME="bk-arm64-patch-$(date +%Y%m%d)"
 VM_SIZE="Standard_D4pds_v6"
 FALLBACK_SKUS=(Standard_D4ps_v6 Standard_D4pds_v5 Standard_D4plds_v6)
-BASE_IMAGE_NAME="bk-arm64-runner-image"
-NEW_IMAGE_NAME="bk-arm64-runner-image-$(date +%Y%m%d)"
+GALLERY_NAME="bkarm64gallery"
+IMAGE_DEF="bk-arm64-runner"
 VMSS_NAME="arm64-runner-ss"
 ADMIN_USER="bkrunner"
-IMAGES_TO_KEEP=2
+VERSIONS_TO_KEEP=2
 WEBHOOK_URL=""
 DRY_RUN=false
 
@@ -72,7 +73,8 @@ notify() {
         {"type":"TextBlock","text":"${title}","weight":"Bolder","size":"Medium","wrap":true,"color":"${color}"},
         {"type":"TextBlock","text":"${detail}","wrap":true,"spacing":"Small"},
         {"type":"FactSet","facts":[
-          {"title":"Image","value":"${NEW_IMAGE_NAME}"},
+          {"title":"Gallery","value":"${GALLERY_NAME}/${IMAGE_DEF}"},
+          {"title":"Version","value":"${NEW_VERSION:-unknown}"},
           {"title":"SKU","value":"${VM_SIZE}"},
           {"title":"Time","value":"$(date -u '+%Y-%m-%d %H:%M UTC')"}
         ]}
@@ -110,24 +112,38 @@ run_command() {
 
 # ═══════════════════════════════════════════════════════════════════════════════
 log "=== Golden Image Patching ==="
-log "Base image: $BASE_IMAGE_NAME"
-log "New image:  $NEW_IMAGE_NAME"
-log "VM size:    $VM_SIZE"
-log "Dry run:    $DRY_RUN"
+log "Gallery:  $GALLERY_NAME/$IMAGE_DEF"
+log "VM size:  $VM_SIZE"
+log "Dry run:  $DRY_RUN"
 
 if [[ "$DRY_RUN" == true ]]; then
     log "Dry run mode — exiting without making changes"
     exit 0
 fi
 
-# ─── Step 1: Verify base image exists ────────────────────────────────────────
-log "Step 1: Verifying base image..."
-IMAGE_ID=$(az image show --resource-group "$RG" --name "$BASE_IMAGE_NAME" --query id -o tsv 2>/dev/null) || {
-    err "Base image '$BASE_IMAGE_NAME' not found"
-    notify "⚠️ Image Patching Failed" "Base image not found: $BASE_IMAGE_NAME" "Attention"
+# ─── Step 1: Find latest gallery image version ──────────────────────────────
+log "Step 1: Finding latest gallery image version..."
+LATEST_VERSION=$(az sig image-version list \
+    --resource-group "$RG" \
+    --gallery-name "$GALLERY_NAME" \
+    --gallery-image-definition "$IMAGE_DEF" \
+    --query "sort_by([].{name:name, date:publishingProfile.publishedDate}, &date)[-1].name" \
+    -o tsv 2>/dev/null) || LATEST_VERSION=""
+
+if [[ -z "$LATEST_VERSION" ]]; then
+    err "No image versions found in $GALLERY_NAME/$IMAGE_DEF"
+    notify "⚠️ Image Patching Failed" "No gallery image versions found" "Attention"
     exit 1
-}
-log "Base image found: $IMAGE_ID"
+fi
+
+IMAGE_ID="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RG/providers/Microsoft.Compute/galleries/$GALLERY_NAME/images/$IMAGE_DEF/versions/$LATEST_VERSION"
+log "Latest version: $LATEST_VERSION"
+log "Image ID: $IMAGE_ID"
+
+# Compute next version: increment the minor component (e.g., 1.0.0 → 1.1.0)
+IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "$LATEST_VERSION"
+NEW_VERSION="${V_MAJOR}.$(( V_MINOR + 1 )).0"
+log "New version will be: $NEW_VERSION"
 
 # ─── Step 2: Create temporary VM from the golden image ───────────────────────
 log "Step 2: Creating temporary VM..."
@@ -288,58 +304,58 @@ az vm deallocate --resource-group "$RG" --name "$VM_NAME"
 log "Generalizing VM..."
 az vm generalize --resource-group "$RG" --name "$VM_NAME"
 
-log "Capturing image as '$NEW_IMAGE_NAME'..."
-az image create \
+log "Capturing as gallery image version '$NEW_VERSION'..."
+az sig image-version create \
     --resource-group "$RG" \
-    --name "$NEW_IMAGE_NAME" \
-    --source "$VM_NAME" \
-    --os-type Windows \
-    --hyper-v-generation V2 \
-    --location "$LOCATION" \
+    --gallery-name "$GALLERY_NAME" \
+    --gallery-image-definition "$IMAGE_DEF" \
+    --gallery-image-version "$NEW_VERSION" \
+    --virtual-machine "$VM_NAME" \
+    --target-regions "$LOCATION" \
+    --replica-count 1 \
     --output table
 
-NEW_IMAGE_ID=$(az image show --resource-group "$RG" --name "$NEW_IMAGE_NAME" --query id -o tsv 2>/dev/null)
-log "New image created: $NEW_IMAGE_ID"
-
-# ─── Step 7: Update the canonical image alias ───────────────────────────────
-log "Step 7: Updating canonical image '$BASE_IMAGE_NAME' → '$NEW_IMAGE_NAME'..."
-# Delete old canonical image and recreate pointing to the new source
-# (Azure managed images can't be "renamed", so we recreate the alias)
-az image delete --resource-group "$RG" --name "$BASE_IMAGE_NAME" 2>/dev/null || true
-az image create \
+NEW_IMAGE_ID=$(az sig image-version show \
     --resource-group "$RG" \
-    --name "$BASE_IMAGE_NAME" \
-    --source "$VM_NAME" \
-    --os-type Windows \
-    --hyper-v-generation V2 \
-    --location "$LOCATION" \
-    --output none 2>/dev/null || log "Note: canonical alias update skipped (VM already generalized)"
+    --gallery-name "$GALLERY_NAME" \
+    --gallery-image-definition "$IMAGE_DEF" \
+    --gallery-image-version "$NEW_VERSION" \
+    --query id -o tsv 2>/dev/null)
+log "New image version created: $NEW_IMAGE_ID"
 
-# ─── Step 8: Update VMSS model to use new image ─────────────────────────────
-log "Step 8: Updating VMSS model..."
+# ─── Step 7: Update VMSS model to use new gallery version ───────────────────
+log "Step 7: Updating VMSS model..."
 az vmss update \
     --resource-group "$RG" \
     --name "$VMSS_NAME" \
     --set "virtualMachineProfile.storageProfile.imageReference.id=$NEW_IMAGE_ID" \
-    --output none 2>/dev/null && log "VMSS model updated to $NEW_IMAGE_NAME" || {
+    --output none 2>/dev/null && log "VMSS model updated to version $NEW_VERSION" || {
     err "Failed to update VMSS model — manual update required"
-    notify "⚠️ Image Patching — Manual Action Needed" "Image $NEW_IMAGE_NAME created but VMSS model update failed" "Warning"
+    notify "⚠️ Image Patching — Manual Action Needed" "Version $NEW_VERSION created but VMSS update failed" "Warning"
 }
 
-# ─── Step 9: Clean up old dated images (keep last N) ─────────────────────────
-log "Step 9: Cleaning up old images (keeping last $IMAGES_TO_KEEP)..."
-OLD_IMAGES=$(az image list --resource-group "$RG" \
-    --query "[?starts_with(name,'bk-arm64-runner-image-')].name" -o tsv 2>/dev/null \
-    | sort -r | tail -n +$(( IMAGES_TO_KEEP + 1 )))
+# ─── Step 8: Clean up old gallery versions (keep last N) ─────────────────────
+log "Step 8: Cleaning up old versions (keeping last $VERSIONS_TO_KEEP)..."
+OLD_VERSIONS=$(az sig image-version list \
+    --resource-group "$RG" \
+    --gallery-name "$GALLERY_NAME" \
+    --gallery-image-definition "$IMAGE_DEF" \
+    --query "sort_by([].{name:name, date:publishingProfile.publishedDate}, &date)[:-${VERSIONS_TO_KEEP}].name" \
+    -o tsv 2>/dev/null)
 
-if [[ -n "$OLD_IMAGES" ]]; then
-    while IFS= read -r img; do
-        [[ -z "$img" ]] && continue
-        log "  Deleting old image: $img"
-        az image delete --resource-group "$RG" --name "$img" --no-wait 2>/dev/null || true
-    done <<< "$OLD_IMAGES"
+if [[ -n "$OLD_VERSIONS" ]]; then
+    while IFS= read -r ver; do
+        [[ -z "$ver" ]] && continue
+        log "  Deleting old version: $ver"
+        az sig image-version delete \
+            --resource-group "$RG" \
+            --gallery-name "$GALLERY_NAME" \
+            --gallery-image-definition "$IMAGE_DEF" \
+            --gallery-image-version "$ver" \
+            --no-wait 2>/dev/null || true
+    done <<< "$OLD_VERSIONS"
 else
-    log "  No old images to clean up"
+    log "  No old versions to clean up"
 fi
 
 # ─── Done ────────────────────────────────────────────────────────────────────
@@ -349,7 +365,7 @@ trap - EXIT
 cleanup_vm
 
 log "=== Image patching complete ==="
-log "New image: $NEW_IMAGE_NAME"
+log "New version: $GALLERY_NAME/$IMAGE_DEF:$NEW_VERSION"
 log "VMSS updated: $VMSS_NAME"
 
-notify "✅ Golden Image Patched" "Image $NEW_IMAGE_NAME created and VMSS updated successfully" "Good"
+notify "✅ Golden Image Patched" "Version $NEW_VERSION created and VMSS updated successfully" "Good"
