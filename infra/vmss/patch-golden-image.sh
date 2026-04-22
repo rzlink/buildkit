@@ -286,17 +286,27 @@ Remove-Item -Recurse -Force "C:\Users\bkrunner\AppData\Local\Temp\*" -ErrorActio
 & C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /quiet
 ' --output json 2>/dev/null | jq -r '.value[0].message' 2>/dev/null || true
 
-log "Waiting for VM to shut down after sysprep (up to 5 minutes)..."
-for i in $(seq 1 30); do
+SYSPREP_TIMEOUT=90  # 90 × 10s = 15 minutes
+log "Waiting for VM to shut down after sysprep (up to 15 minutes)..."
+SYSPREP_OK=false
+for i in $(seq 1 "$SYSPREP_TIMEOUT"); do
     state=$(az vm get-instance-view --resource-group "$RG" --name "$VM_NAME" \
         --query "instanceView.statuses[1].displayStatus" -o tsv 2>/dev/null)
     if [[ "$state" == *"stopped"* ]] || [[ "$state" == *"deallocated"* ]]; then
-        log "VM stopped."
+        log "VM stopped after sysprep."
+        SYSPREP_OK=true
         break
     fi
-    log "  [$i/30] State: $state"
+    log "  [$i/$SYSPREP_TIMEOUT] State: $state"
     sleep 10
 done
+
+if [[ "$SYSPREP_OK" != "true" ]]; then
+    log "ERROR: Sysprep did not shut down VM within 15 minutes — aborting capture."
+    log "Deleting temporary VM to avoid leaving broken resources..."
+    az vm delete --resource-group "$RG" --name "$VM_NAME" --yes --no-wait 2>/dev/null || true
+    exit 1
+fi
 
 log "Deallocating VM..."
 az vm deallocate --resource-group "$RG" --name "$VM_NAME"
@@ -334,6 +344,29 @@ az vmss update \
     err "Failed to update VMSS model — manual update required"
     notify "⚠️ Image Patching — Manual Action Needed" "Version $NEW_VERSION created but VMSS update failed" "Warning"
 }
+
+# Smoke test: provision one instance to verify the image works
+log "Smoke test: provisioning 1 VMSS instance to verify image..."
+if az vmss scale --resource-group "$RG" --name "$VMSS_NAME" --new-capacity 1 --output none 2>/dev/null; then
+    log "✓  Smoke test passed — image provisions correctly"
+    az vmss scale --resource-group "$RG" --name "$VMSS_NAME" --new-capacity 0 --no-wait --output none 2>/dev/null
+else
+    log "ERROR: Smoke test FAILED — new image cannot provision VMs"
+    log "Reverting VMSS to previous version $LATEST_VERSION..."
+    PREV_IMAGE_ID=$(az sig image-version show \
+        --resource-group "$RG" \
+        --gallery-name "$GALLERY_NAME" \
+        --gallery-image-definition "$IMAGE_DEF" \
+        --gallery-image-version "$LATEST_VERSION" \
+        --query id -o tsv 2>/dev/null)
+    az vmss update --resource-group "$RG" --name "$VMSS_NAME" \
+        --set "virtualMachineProfile.storageProfile.imageReference.id=$PREV_IMAGE_ID" \
+        --output none 2>/dev/null
+    az vmss scale --resource-group "$RG" --name "$VMSS_NAME" --new-capacity 0 --no-wait --output none 2>/dev/null
+    log "VMSS reverted to version $LATEST_VERSION"
+    notify "❌ Image Patching Failed" "Version $NEW_VERSION failed smoke test. VMSS reverted to $LATEST_VERSION." "Failure"
+    exit 1
+fi
 
 # ─── Step 8: Clean up old gallery versions (keep last N) ─────────────────────
 log "Step 8: Cleaning up old versions (keeping last $VERSIONS_TO_KEEP)..."
