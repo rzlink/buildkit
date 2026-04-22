@@ -23,7 +23,7 @@ set -euo pipefail
 # ─── Configuration ───────────────────────────────────────────────────────────
 RG="buildkit-arm64-runner-rg"
 LOCATION="eastus2"
-VM_NAME="bk-arm64-patch-$(date +%Y%m%d)"
+VM_NAME="bkpatch$(date +%Y%m%d)"
 VM_SIZE="Standard_D4pds_v6"
 FALLBACK_SKUS=(Standard_D4ps_v6 Standard_D4pds_v5 Standard_D4plds_v6)
 GALLERY_NAME="bkarm64gallery"
@@ -305,12 +305,13 @@ log "Generalizing VM..."
 az vm generalize --resource-group "$RG" --name "$VM_NAME"
 
 log "Capturing as gallery image version '$NEW_VERSION'..."
+VM_ID=$(az vm show --resource-group "$RG" --name "$VM_NAME" --query id -o tsv)
 az sig image-version create \
     --resource-group "$RG" \
     --gallery-name "$GALLERY_NAME" \
     --gallery-image-definition "$IMAGE_DEF" \
     --gallery-image-version "$NEW_VERSION" \
-    --virtual-machine "$VM_NAME" \
+    --virtual-machine "$VM_ID" \
     --target-regions "$LOCATION" \
     --replica-count 1 \
     --output table
