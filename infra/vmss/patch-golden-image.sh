@@ -24,8 +24,8 @@ set -euo pipefail
 RG="buildkit-arm64-runner-rg-westus2"
 LOCATION="westus2"
 VM_NAME="bkp$(date +%m%d%H%M)"
-VM_SIZE="Standard_D4pds_v6"
-FALLBACK_SKUS=(Standard_D4plds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
+VM_SIZE="Standard_D4plds_v6"
+FALLBACK_SKUS=(Standard_D4pds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
 GALLERY_NAME="bkarm64gallerywu2"
 IMAGE_DEF="bk-arm64-runner"
 VMSS_NAME="arm64-runner-ss"
