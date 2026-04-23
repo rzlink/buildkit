@@ -363,6 +363,8 @@ else
                 break  # try next SKU
             else
                 err "VMSS scale-up failed with non-retryable error"
+                az vmss scale -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --new-capacity 0 -o none 2>/dev/null || true
+                az vmss update -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --set "sku.name=$PRIMARY_SKU" -o none 2>/dev/null || true
                 notify_failure "VMSS scale-up failed" "Non-retryable Azure error during scale-up"
                 exit 1
             fi
@@ -372,7 +374,8 @@ else
     if [[ "$SCALE_SUCCESS" != true ]]; then
         err "VMSS scale-up failed — all SKUs exhausted: ${ALL_SKUS[*]}"
         notify_failure "VMSS scale-up failed" "All SKUs exhausted (tried: ${ALL_SKUS[*]})"
-        # Restore primary SKU for next run
+        # Clean up: scale to 0 and restore primary SKU for next run
+        az vmss scale -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --new-capacity 0 -o none 2>/dev/null || true
         az vmss update -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --set "sku.name=$PRIMARY_SKU" -o none 2>/dev/null || true
         exit 1
     fi
