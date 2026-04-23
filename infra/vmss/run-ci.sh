@@ -322,6 +322,8 @@ else
         # Switch VMSS SKU if not the first attempt
         if [[ "$sku_idx" -gt 0 ]]; then
             log "Trying fallback SKU: $SKU"
+            # Scale to 0 first — can't change SKU with existing instances
+            az vmss scale -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --new-capacity 0 -o none 2>/dev/null || true
             if ! az vmss update -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --set "sku.name=$SKU" -o none 2>/dev/null; then
                 warn "Failed to switch VMSS to $SKU — skipping"
                 continue
