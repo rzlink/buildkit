@@ -40,8 +40,8 @@ RESOURCE_GROUP="buildkit-arm64-runner-rg-westus2"
 VMSS_NAME="arm64-runner-ss"
 REPO="rzlink/buildkit"
 WORKFLOW="test-os.yml"
-PRIMARY_SKU="Standard_D4pds_v6"
-FALLBACK_SKUS=(Standard_D4plds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
+PRIMARY_SKU="Standard_D4plds_v6"
+FALLBACK_SKUS=(Standard_D4pds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 CAPACITY=12
@@ -333,7 +333,10 @@ else
 
         for attempt in $(seq 1 $SCALE_MAX_RETRIES); do
             log "Scaling VMSS to $CAPACITY instances ($SKU, attempt $attempt/$SCALE_MAX_RETRIES)..."
-            if SCALE_OUTPUT=$(az vmss scale -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --new-capacity "$CAPACITY" -o none 2>&1); then
+            SCALE_OUTPUT=$(az vmss scale -g "$RESOURCE_GROUP" -n "$VMSS_NAME" --new-capacity "$CAPACITY" -o none 2>&1) && SCALE_RC=0 || SCALE_RC=$?
+
+            # az vmss scale can return 0 even on SkuNotAvailable — check output too
+            if [[ $SCALE_RC -eq 0 ]] && ! echo "$SCALE_OUTPUT" | grep -qi "SkuNotAvailable\|error"; then
                 SCALE_SUCCESS=true
                 ACTIVE_SKU="$SKU"
                 ok "VMSS scaled to $CAPACITY instances (SKU: $SKU)"
