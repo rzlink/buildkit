@@ -41,7 +41,7 @@ VMSS_NAME="arm64-runner-ss"
 REPO="rzlink/buildkit"
 WORKFLOW="test-os.yml"
 PRIMARY_SKU="Standard_D4pds_v6"
-FALLBACK_SKUS=(Standard_D4ps_v6 Standard_D4pds_v5 Standard_D4plds_v6)
+FALLBACK_SKUS=(Standard_D4plds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 CAPACITY=12
@@ -356,6 +356,9 @@ else
                     warn "SKU $SKU exhausted after $SCALE_MAX_RETRIES attempts"
                     break  # try next SKU
                 fi
+            elif echo "$SCALE_OUTPUT" | grep -qi "OSProvisioningTimedOut\|ProvisioningTimeout"; then
+                warn "Provisioning timed out on $SKU (too slow) — trying next SKU"
+                break  # try next SKU
             else
                 err "VMSS scale-up failed with non-retryable error"
                 notify_failure "VMSS scale-up failed" "Non-retryable Azure error during scale-up"
