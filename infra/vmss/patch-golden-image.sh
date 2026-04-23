@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - Azure CLI authenticated
-#   - Shared Image Gallery 'bkarm64gallery' with image definition 'bk-arm64-runner'
+#   - Shared Image Gallery 'bkarm64gallerywu2' with image definition 'bk-arm64-runner'
 #
 # Usage:
 #   ./patch-golden-image.sh [--sku SKU] [--notify WEBHOOK_URL] [--dry-run]
@@ -21,12 +21,12 @@
 set -euo pipefail
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-RG="buildkit-arm64-runner-rg"
-LOCATION="eastus2"
+RG="buildkit-arm64-runner-rg-westus2"
+LOCATION="westus2"
 VM_NAME="bkp$(date +%m%d%H%M)"
 VM_SIZE="Standard_D4pds_v6"
 FALLBACK_SKUS=(Standard_D4plds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
-GALLERY_NAME="bkarm64gallery"
+GALLERY_NAME="bkarm64gallerywu2"
 IMAGE_DEF="bk-arm64-runner"
 VMSS_NAME="arm64-runner-ss"
 ADMIN_USER="bkrunner"
