@@ -23,9 +23,9 @@ set -euo pipefail
 # ─── Configuration ───────────────────────────────────────────────────────────
 RG="buildkit-arm64-runner-rg"
 LOCATION="eastus2"
-VM_NAME="bkpatch$(date +%Y%m%d)"
+VM_NAME="bkp$(date +%m%d%H%M)"
 VM_SIZE="Standard_D4pds_v6"
-FALLBACK_SKUS=(Standard_D4ps_v6 Standard_D4pds_v5 Standard_D4plds_v6)
+FALLBACK_SKUS=(Standard_D4plds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
 GALLERY_NAME="bkarm64gallery"
 IMAGE_DEF="bk-arm64-runner"
 VMSS_NAME="arm64-runner-ss"
@@ -207,6 +207,31 @@ $count = ($updates | Where-Object { $_ -match "Installed|Downloaded" }).Count
 Write-Output "Windows Update complete: $count updates applied."
 '
 
+# Check if reboot is needed (Windows Updates or pending from base image)
+REBOOT_CHECK=$(az vm run-command invoke \
+    --resource-group "$RG" --name "$VM_NAME" \
+    --command-id RunPowerShellScript \
+    --scripts 'Import-Module PSWindowsUpdate; $r = Get-WURebootStatus -Silent; Write-Output "RebootRequired=$r"' \
+    --output json 2>/dev/null | jq -r '.value[0].message' 2>/dev/null) || REBOOT_CHECK=""
+
+if echo "$REBOOT_CHECK" | grep -qi "RebootRequired=True"; then
+    log "Reboot required — restarting VM and waiting for it to come back..."
+    az vm restart --resource-group "$RG" --name "$VM_NAME" --output none 2>/dev/null
+    sleep 120  # wait 2 min for reboot to complete
+    # Wait for VM agent to become ready (up to 5 min)
+    for i in $(seq 1 30); do
+        agent_status=$(az vm get-instance-view --resource-group "$RG" --name "$VM_NAME" \
+            --query "instanceView.vmAgent.statuses[0].displayStatus" -o tsv 2>/dev/null)
+        if [[ "$agent_status" == "Ready" ]]; then
+            log "VM back online after reboot (iteration $i)."
+            break
+        fi
+        sleep 10
+    done
+else
+    log "No reboot required."
+fi
+
 # ─── Step 4: Update toolchains ───────────────────────────────────────────────
 log "Step 4: Updating toolchains..."
 run_command "Updating Git, Go, Node, Python, Runner..." '
@@ -276,36 +301,65 @@ Write-Output "Containers: $((Get-WindowsOptionalFeature -Online -FeatureName Con
 
 # ─── Step 6: Sysprep and capture ─────────────────────────────────────────────
 log "Step 6: Running sysprep..."
-az vm run-command invoke \
+
+# Clean temp files, then launch sysprep as a detached process via Start-Process.
+# Using Start-Process avoids sysprep being killed when the VM Agent cleans up the
+# run-command session. Sysprep /generalize resets the VM Agent, so a direct call
+# (&) can be interrupted before /shutdown completes on ARM64 Windows.
+SYSPREP_OUTPUT=$(az vm run-command invoke \
     --resource-group "$RG" \
     --name "$VM_NAME" \
     --command-id RunPowerShellScript \
     --scripts '
 Remove-Item -Recurse -Force C:\Windows\Temp\* -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force "C:\Users\bkrunner\AppData\Local\Temp\*" -ErrorAction SilentlyContinue
-& C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /quiet
-' --output json 2>/dev/null | jq -r '.value[0].message' 2>/dev/null || true
+Start-Process -FilePath "C:\Windows\System32\Sysprep\sysprep.exe" -ArgumentList "/generalize","/oobe","/shutdown","/quiet"
+Start-Sleep -Seconds 10
+Write-Output "Sysprep launched"
+' --output json 2>&1) || true
+log "Sysprep invoke result: $(echo "$SYSPREP_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "$SYSPREP_OUTPUT" | tail -5)"
 
-SYSPREP_TIMEOUT=90  # 90 × 10s = 15 minutes
-log "Waiting for VM to shut down after sysprep (up to 15 minutes)..."
+# Wait for VM to shut down (sysprep /shutdown on ARM64 can take 10+ minutes)
+SYSPREP_TIMEOUT=120  # 120 × 10s = 20 minutes
+log "Waiting for VM to shut down after sysprep (up to 20 minutes)..."
 SYSPREP_OK=false
 for i in $(seq 1 "$SYSPREP_TIMEOUT"); do
     state=$(az vm get-instance-view --resource-group "$RG" --name "$VM_NAME" \
         --query "instanceView.statuses[1].displayStatus" -o tsv 2>/dev/null)
     if [[ "$state" == *"stopped"* ]] || [[ "$state" == *"deallocated"* ]]; then
-        log "VM stopped after sysprep."
+        log "VM stopped after sysprep (iteration $i)."
         SYSPREP_OK=true
         break
     fi
-    log "  [$i/$SYSPREP_TIMEOUT] State: $state"
+    # Log every 30 iterations (~5 min) to avoid excessive output
+    if (( i % 30 == 0 )) || (( i <= 3 )); then
+        log "  [$i/$SYSPREP_TIMEOUT] State: $state"
+    fi
     sleep 10
 done
 
 if [[ "$SYSPREP_OK" != "true" ]]; then
-    log "ERROR: Sysprep did not shut down VM within 15 minutes — aborting capture."
-    log "Deleting temporary VM to avoid leaving broken resources..."
-    az vm delete --resource-group "$RG" --name "$VM_NAME" --yes --no-wait 2>/dev/null || true
-    exit 1
+    # Check sysprep log inside VM to see if generalization actually completed
+    log "Sysprep /shutdown didn't stop VM in 20 min. Checking sysprep log..."
+    SYSPREP_LOG=$(az vm run-command invoke \
+        --resource-group "$RG" --name "$VM_NAME" \
+        --command-id RunPowerShellScript \
+        --scripts 'Get-Content C:\Windows\System32\Sysprep\Panther\setupact.log -Tail 20' \
+        --output json 2>/dev/null | jq -r '.value[0].message' 2>/dev/null) || SYSPREP_LOG="(could not read log)"
+    log "Sysprep log tail: $SYSPREP_LOG"
+
+    # Check for sysprep ERRORS first — if errors found, abort
+    if echo "$SYSPREP_LOG" | grep -qi "Error.*SYSPRP\|SYSPRP.*Error\|halting sysprep"; then
+        log "ERROR: Sysprep failed (errors found in log) — aborting capture."
+        log "Deleting temporary VM to avoid leaving broken resources..."
+        az vm delete --resource-group "$RG" --name "$VM_NAME" --yes --no-wait 2>/dev/null || true
+        exit 1
+    fi
+
+    # No errors found; sysprep may still be running. Force-stop.
+    log "No sysprep errors found. Force-stopping VM for capture..."
+    az vm stop --resource-group "$RG" --name "$VM_NAME" --skip-shutdown 2>/dev/null || true
+    sleep 10
 fi
 
 log "Deallocating VM..."
@@ -346,10 +400,26 @@ az vmss update \
 }
 
 # Smoke test: provision one instance to verify the image works
+# Use the SKU that successfully created the patching VM (primary may be unavailable)
+VMSS_CURRENT_SKU=$(az vmss show --resource-group "$RG" --name "$VMSS_NAME" --query "sku.name" -o tsv 2>/dev/null)
+SMOKE_SKU_CHANGED=false
+if [[ "$VMSS_CURRENT_SKU" != "$VM_SIZE" ]]; then
+    log "Smoke test: temporarily switching VMSS SKU from $VMSS_CURRENT_SKU to $VM_SIZE"
+    az vmss update --resource-group "$RG" --name "$VMSS_NAME" \
+        --set "sku.name=$VM_SIZE" --output none 2>/dev/null
+    SMOKE_SKU_CHANGED=true
+fi
+
 log "Smoke test: provisioning 1 VMSS instance to verify image..."
 if az vmss scale --resource-group "$RG" --name "$VMSS_NAME" --new-capacity 1 --output none 2>/dev/null; then
     log "✓  Smoke test passed — image provisions correctly"
     az vmss scale --resource-group "$RG" --name "$VMSS_NAME" --new-capacity 0 --no-wait --output none 2>/dev/null
+    # Restore original SKU (run-ci.sh handles its own SKU failover)
+    if [[ "$SMOKE_SKU_CHANGED" == true ]]; then
+        az vmss update --resource-group "$RG" --name "$VMSS_NAME" \
+            --set "sku.name=$VMSS_CURRENT_SKU" --output none 2>/dev/null
+        log "VMSS SKU restored to $VMSS_CURRENT_SKU"
+    fi
 else
     log "ERROR: Smoke test FAILED — new image cannot provision VMs"
     log "Reverting VMSS to previous version $LATEST_VERSION..."
@@ -363,6 +433,11 @@ else
         --set "virtualMachineProfile.storageProfile.imageReference.id=$PREV_IMAGE_ID" \
         --output none 2>/dev/null
     az vmss scale --resource-group "$RG" --name "$VMSS_NAME" --new-capacity 0 --no-wait --output none 2>/dev/null
+    # Restore original SKU on failure too
+    if [[ "$SMOKE_SKU_CHANGED" == true ]]; then
+        az vmss update --resource-group "$RG" --name "$VMSS_NAME" \
+            --set "sku.name=$VMSS_CURRENT_SKU" --output none 2>/dev/null
+    fi
     log "VMSS reverted to version $LATEST_VERSION"
     notify "❌ Image Patching Failed" "Version $NEW_VERSION failed smoke test. VMSS reverted to $LATEST_VERSION." "Failure"
     exit 1
