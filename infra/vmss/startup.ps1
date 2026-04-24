@@ -7,18 +7,17 @@
 #   register -> run one job -> re-register -> run next job -> ...
 #
 # Prerequisites:
-#   - VMSS has user-assigned managed identity with Key Vault secret read access
-#   - Key Vault 'bk-arm64-kv-wu2' has secret 'github-pat' with a PAT (repo scope)
+#   - VMSS has system-assigned managed identity with Key Vault secret read access
+#   - Key Vault 'bk-arm64-kv' has secret 'github-pat' with a PAT (repo scope)
 #   - GitHub Actions runner agent pre-installed at C:\actions-runner
-#   - runner-loop.ps1 uploaded to bkarm64scriptswu2 blob storage
+#   - runner-loop.ps1 uploaded to bkarm64scripts blob storage
 
 $ErrorActionPreference = "Stop"
 
-$KeyVaultName = "bk-arm64-kv-wu2"
+$KeyVaultName = "bk-arm64-kv"
 $SecretName = "github-pat"
 $RunnerDir = "C:\actions-runner"
-$LoopScriptUrl = "https://bkarm64scriptswu2.blob.core.windows.net/scripts/runner-loop.ps1?se=2028-04-23T00%3A00%3A00Z&sp=r&sv=2026-02-06&sr=b&sig=H1YcSXcNEyliB7tWobgPaycs3Qoli8JiooPc5WeDSwg%3D"
-$ManagedIdentityClientId = "a3692d8c-22d5-4a8f-9179-7fedbc7cbcca"
+$LoopScriptUrl = "https://bkarm64scripts.blob.core.windows.net/scripts/runner-loop.ps1?se=2027-03-20T22%3A59Z&sp=r&sv=2026-02-06&sr=b&sig=2M7SAKJApSGt5swEyucvdWwombJjTER5yVgH%2BFJH878%3D"
 
 # Log to file for debugging
 $LogFile = "C:\actions-runner\startup.log"
@@ -30,10 +29,10 @@ function Log($msg) {
 Log "=== VMSS Runner Startup ==="
 Log "Hostname: $env:COMPUTERNAME"
 
-# Step 1: Verify Key Vault access (user-assigned managed identity)
+# Step 1: Verify Key Vault access
 Log "Verifying Key Vault access..."
 try {
-    $tokenResponse = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net&client_id=$ManagedIdentityClientId" `
+    $tokenResponse = Invoke-RestMethod -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net" `
         -Headers @{Metadata="true"} -Method GET
     $kvUri = "https://$KeyVaultName.vault.azure.net/secrets/$SecretName" + "?api-version=7.4"
     $secretResponse = Invoke-RestMethod -Uri $kvUri `
