@@ -262,12 +262,15 @@ else
                 if git push origin "$FEATURE_BRANCH" --force-with-lease --quiet 2>/dev/null; then
                     ok "Pushed rebased branch to origin"
                 else
-                    warn "Failed to push rebased branch"
+                    err "Failed to push rebased branch — GitHub will run stale code"
+                    notify_failure "Rebase push failed" "Rebase succeeded locally but push to origin failed for $FEATURE_BRANCH. Tests would run against stale code. Fix manually and re-run."
+                    exit 1
                 fi
             else
-                warn "Rebase conflict detected — aborting rebase"
+                err "Rebase conflict detected — cannot continue"
                 git rebase --abort 2>/dev/null || true
-                warn "Continuing with existing branch state"
+                notify_failure "Rebase conflict" "Failed to rebase $FEATURE_BRANCH onto master. Resolve conflicts manually and push, then re-run CI."
+                exit 1
             fi
         fi
 
