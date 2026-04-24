@@ -12,13 +12,12 @@
 
 $ErrorActionPreference = "Stop"
 
-$KeyVaultName = "bk-arm64-kv-wu2"
+$KeyVaultName = "bk-arm64-kv"
 $SecretName = "github-pat"
 $RunnerDir = "C:\actions-runner"
 $RepoOwner = "rzlink"
 $RepoName = "buildkit"
 $RunnerLabels = "windows-arm64-selfhosted"
-$ManagedIdentityClientId = "a3692d8c-22d5-4a8f-9179-7fedbc7cbcca"
 
 $LogFile = "$RunnerDir\runner-loop.log"
 function Log($msg) {
@@ -30,9 +29,9 @@ Log "=== Runner Loop Started on $env:COMPUTERNAME ==="
 
 while ($true) {
     try {
-        # Step 1: Get managed identity token for Key Vault (user-assigned identity)
+        # Step 1: Get managed identity token for Key Vault
         $tokenResponse = Invoke-RestMethod `
-            -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net&client_id=$ManagedIdentityClientId" `
+            -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net" `
             -Headers @{Metadata = "true"} -Method GET
 
         # Step 2: Get GitHub PAT from Key Vault

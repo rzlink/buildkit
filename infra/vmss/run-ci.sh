@@ -36,7 +36,7 @@
 set -euo pipefail
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-RESOURCE_GROUP="buildkit-arm64-runner-rg-westus2"
+RESOURCE_GROUP="buildkit-arm64-runner-rg"
 VMSS_NAME="arm64-runner-ss"
 REPO="rzlink/buildkit"
 WORKFLOW="test-os.yml"
