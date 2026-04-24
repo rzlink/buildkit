@@ -44,19 +44,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ─── Load Teams webhook URL from config if not set via --notify ──────────────
+if [[ -z "$WEBHOOK_URL" ]]; then
+    TEAMS_CONFIG="$HOME/.config/run-ci/teams.env"
+    if [[ -f "$TEAMS_CONFIG" ]]; then
+        # shellcheck disable=SC1091
+        source "$TEAMS_CONFIG"
+        WEBHOOK_URL="${TEAMS_WEBHOOK_URL:-$WEBHOOK_URL}"
+    fi
+fi
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 err()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2; }
 
 notify() {
     local title="$1" detail="$2" color="${3:-Default}"
-    [[ -z "$WEBHOOK_URL" ]] && return 0
-    # Load from env file if variable is a path
-    if [[ -f "$HOME/.config/run-ci/teams.env" ]] && [[ -z "$WEBHOOK_URL" ]]; then
-        # shellcheck disable=SC1091
-        source "$HOME/.config/run-ci/teams.env"
-        WEBHOOK_URL="${TEAMS_WEBHOOK_URL:-}"
-    fi
     [[ -z "$WEBHOOK_URL" ]] && return 0
     local payload
     payload=$(cat <<ENDJSON
@@ -96,7 +99,19 @@ cleanup_vm() {
         az resource delete --ids "$res" --no-wait 2>/dev/null || true
     done
 }
-trap cleanup_vm EXIT
+
+# Notify on any unexpected failure (set -e), then clean up VM
+on_error() {
+    local exit_code=$?
+    local line_no=${BASH_LINENO[0]}
+    err "Unexpected failure at line $line_no (exit code $exit_code)"
+    notify "❌ Image Patching Failed" "Unexpected error at line $line_no (exit code $exit_code). Check log for details." "Attention"
+    CLEANUP_DONE=true
+    cleanup_vm
+}
+CLEANUP_DONE=false
+trap on_error ERR
+trap '[ "$CLEANUP_DONE" = true ] || cleanup_vm' EXIT
 
 run_command() {
     local desc="$1"
@@ -351,6 +366,7 @@ if [[ "$SYSPREP_OK" != "true" ]]; then
     # Check for sysprep ERRORS first — if errors found, abort
     if echo "$SYSPREP_LOG" | grep -qi "Error.*SYSPRP\|SYSPRP.*Error\|halting sysprep"; then
         log "ERROR: Sysprep failed (errors found in log) — aborting capture."
+        notify "❌ Image Patching Failed" "Sysprep failed — errors found in sysprep log. Check log for details." "Attention"
         log "Deleting temporary VM to avoid leaving broken resources..."
         az vm delete --resource-group "$RG" --name "$VM_NAME" --yes --no-wait 2>/dev/null || true
         exit 1
