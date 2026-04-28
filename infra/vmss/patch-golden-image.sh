@@ -265,6 +265,14 @@ try {
         Invoke-WebRequest -Uri $gitAsset.browser_download_url -OutFile C:\temp\git.exe -UseBasicParsing
         Start-Process C:\temp\git.exe -ArgumentList "/VERYSILENT","/NORESTART","/NOCANCEL","/SP-" -Wait
         Write-Output "Git updated to: $(& "C:\Program Files\Git\cmd\git.exe" --version)"
+        # Ensure Git\bin is in system PATH (installer may only add Git\cmd)
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+        $sysPath = (Get-ItemProperty -Path $regPath -Name PATH).PATH
+        if ($sysPath -notlike "*Git\bin*") {
+            $sysPath = $sysPath -replace "(C:\\Program Files\\Git\\cmd)", "C:\Program Files\Git\bin;`$1"
+            Set-ItemProperty -Path $regPath -Name PATH -Value $sysPath
+            Write-Output "Added Git\bin to system PATH"
+        }
     }
 } catch { Write-Output "Git update skipped: $_" }
 
@@ -312,6 +320,14 @@ Write-Output "Node: $(& "C:\nodejs\node.exe" --version)"
 Write-Output "Python: $(& "C:\Program Files\Python312-arm64\python.exe" --version)"
 Write-Output "Runner: $(Test-Path C:\actions-runner\run.cmd)"
 Write-Output "Containers: $((Get-WindowsOptionalFeature -Online -FeatureName Containers).State)"
+
+# Verify bash/sh are in PATH (required by GitHub Actions runner)
+$bash = Get-Command bash -ErrorAction SilentlyContinue
+$sh = Get-Command sh -ErrorAction SilentlyContinue
+if (-not $bash) { throw "FATAL: bash not found in PATH — runner will fail" }
+if (-not $sh) { throw "FATAL: sh not found in PATH — runner will fail" }
+Write-Output "bash: $($bash.Source)"
+Write-Output "sh: $($sh.Source)"
 '
 
 # ─── Step 6: Sysprep and capture ─────────────────────────────────────────────
