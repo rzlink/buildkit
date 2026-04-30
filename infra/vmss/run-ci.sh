@@ -41,7 +41,7 @@ VMSS_NAME="arm64-runner-ss"
 REPO="rzlink/buildkit"
 WORKFLOW="test-os.yml"
 PRIMARY_SKU="Standard_D4plds_v6"
-FALLBACK_SKUS=(Standard_D4pds_v6 Standard_D4ps_v6 Standard_D4pds_v5)
+FALLBACK_SKUS=(Standard_D4pds_v6 Standard_D4ps_v6 Standard_D4pls_v6 Standard_D4pds_v5 Standard_D4plds_v5 Standard_D4pls_v5 Standard_D4ps_v5)
 
 # ─── Defaults ────────────────────────────────────────────────────────────────
 CAPACITY=12
