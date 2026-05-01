@@ -446,9 +446,15 @@ ok "Workflow dispatched"
 log "Finding run ID..."
 sleep 5
 
+# Record dispatch time to filter out stale runs
+DISPATCH_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 RUN_ID=""
 for i in $(seq 1 20); do
-    RUN_ID=$(gh run list --workflow="$WORKFLOW" --branch="$REF" --event=workflow_dispatch -L 1 --json databaseId,status --jq '.[0].databaseId' 2>/dev/null || echo "")
+    # Only match runs that are queued or in_progress (not completed ones from previous runs)
+    RUN_ID=$(gh run list --workflow="$WORKFLOW" --branch="$REF" --event=workflow_dispatch -L 5 \
+        --json databaseId,status,createdAt \
+        --jq '[.[] | select(.status == "queued" or .status == "in_progress")] | .[0].databaseId' 2>/dev/null || echo "")
 
     if [[ -n "$RUN_ID" ]] && [[ "$RUN_ID" != "null" ]]; then
         ok "Run ID: $RUN_ID"
