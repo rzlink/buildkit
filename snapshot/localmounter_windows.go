@@ -1,7 +1,9 @@
 package snapshot
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,6 +13,15 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
+
+// crossOSLinuxMarker is the basename of the marker file that
+// util/winlayers writes into a snapshot directory whose Files/
+// tree holds Linux content wrapped as a Windows layer. When a
+// parent layer carries this marker the Windows localMounter
+// bypasses HCS and bind-mounts the parent's Files/ tree
+// directly — HCS PrepareLayer cannot expose Linux-content
+// layers on hosts without Hyper-V backing.
+const crossOSLinuxMarker = ".cross-os-linux"
 
 func (lm *localMounter) Mount() (string, error) {
 	lm.mu.Lock()
@@ -53,6 +64,15 @@ func (lm *localMounter) Mount() (string, error) {
 		// bind mounts here using the bind filter.
 		if err := bindfilter.ApplyFileBinding(dir, m.Source, m.ReadOnly()); err != nil {
 			return "", errors.Wrapf(err, "failed to mount %v", m)
+		}
+	} else if src, ok := crossOSLinuxSource(m); ok {
+		// Cross-OS Linux source: bypass HCS and bind-mount the
+		// parent layer's Files/ tree read-only. HCS PrepareLayer
+		// cannot expose Linux content as a Windows volume on
+		// hosts without Hyper-V; the Files/ tree on disk is the
+		// content the COPY operation needs to read.
+		if err := bindfilter.ApplyFileBinding(dir, src, true); err != nil {
+			return "", errors.Wrapf(err, "failed to bind-mount cross-OS layer files %s", src)
 		}
 	} else {
 		// see https://github.com/moby/buildkit/issues/5807
@@ -102,7 +122,11 @@ func (lm *localMounter) Unmount() error {
 	m := lm.mounts[0]
 
 	if lm.target != "" {
-		if m.Type == "bind" || m.Type == "rbind" {
+		// A cross-OS Linux source layer is satisfied via the bind filter even
+		// though its mount Type is "windows-layer", so re-derive that here to
+		// pick the matching teardown call. The check is ordered last so its
+		// os.Stat is short-circuited away for plain bind/rbind mounts.
+		if m.Type == "bind" || m.Type == "rbind" || isCrossOSLinuxMount(m) {
 			if err := bindfilter.RemoveFileBinding(lm.target); err != nil {
 				// The following two errors denote that lm.target is not a mount point.
 				if !errors.Is(err, windows.ERROR_INVALID_PARAMETER) && !errors.Is(err, windows.ERROR_NOT_FOUND) {
@@ -128,5 +152,51 @@ func (lm *localMounter) Unmount() error {
 		return lm.release()
 	}
 
+	return nil
+}
+
+// crossOSLinuxSource inspects a windows-layer mount and, when its
+// first parent layer carries the cross-OS marker, returns the
+// path that should be bind-mounted in lieu of going through HCS.
+// The returned path is the parent layer's Files/ directory.
+func crossOSLinuxSource(m mount.Mount) (string, bool) {
+	if m.Type != "windows-layer" {
+		return "", false
+	}
+	parents := parseParentLayerPaths(m.Options)
+	if len(parents) == 0 {
+		return "", false
+	}
+	parent := parents[0]
+	if _, err := os.Stat(filepath.Join(parent, crossOSLinuxMarker)); err != nil {
+		return "", false
+	}
+	files := filepath.Join(parent, "Files")
+	if _, err := os.Stat(files); err != nil {
+		return "", false
+	}
+	return files, true
+}
+
+// isCrossOSLinuxMount reports whether the mount is a cross-OS Linux source
+// layer (a windows-layer mount whose parent carries the cross-OS marker).
+func isCrossOSLinuxMount(m mount.Mount) bool {
+	_, ok := crossOSLinuxSource(m)
+	return ok
+}
+
+// parseParentLayerPaths extracts the parentLayerPaths=… option of a
+// Windows layer mount, which the containerd snapshotter emits as a
+// JSON-encoded list of absolute layer directories (parent-first).
+func parseParentLayerPaths(opts []string) []string {
+	const prefix = "parentLayerPaths="
+	for _, opt := range opts {
+		if after, ok := strings.CutPrefix(opt, prefix); ok {
+			var paths []string
+			if err := json.Unmarshal([]byte(after), &paths); err == nil {
+				return paths
+			}
+		}
+	}
 	return nil
 }

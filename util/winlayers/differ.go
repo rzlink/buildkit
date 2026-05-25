@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -45,10 +46,18 @@ type winDiffer struct {
 // Compare creates a diff between the given mounts and uploads the result
 // to the content store.
 func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispecs.Descriptor, err error) {
-	if !hasWindowsLayerMode(ctx) {
-		return s.d.Compare(ctx, lower, upper, opts...)
+	if hasWindowsLayerMode(ctx) {
+		return s.compareWindowsLayer(ctx, lower, upper, opts...)
 	}
+	if hasLinuxLayerMode(ctx) {
+		return s.compareLinuxLayer(ctx, lower, upper, opts...)
+	}
+	return s.d.Compare(ctx, lower, upper, opts...)
+}
 
+// compareWindowsLayer generates a Windows-format tarball from a Linux filesystem diff.
+// Used when a Windows layer is stored on a Linux host.
+func (s *winDiffer) compareWindowsLayer(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispecs.Descriptor, err error) {
 	var config diff.Config
 	for _, opt := range opts {
 		if err := opt(&config); err != nil {
@@ -161,6 +170,15 @@ func (s *winDiffer) Compare(ctx context.Context, lower, upper []mount.Mount, opt
 	return ocidesc, nil
 }
 
+// compareLinuxLayer generates a Linux-format tarball from a Windows filesystem diff.
+// Since the HCS import creates a proper Windows layer with Files/ containing the
+// Linux content, the standard differ can mount the layer and produce diffs.
+// The mount root maps to Files/ for base layers, so the diff output naturally
+// produces standard Linux-format paths.
+func (s *winDiffer) compareLinuxLayer(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispecs.Descriptor, err error) {
+	return s.d.Compare(ctx, lower, upper, opts...)
+}
+
 func uniqueRef() string {
 	t := time.Now()
 	var b [3]byte
@@ -259,6 +277,69 @@ func makeWindowsLayer(ctx context.Context, w io.Writer) (io.Writer, func(error),
 		}()
 		if err != nil {
 			bklog.G(ctx).Errorf("makeWindowsLayer %+v", err)
+		}
+		pw.CloseWithError(err)
+		done <- err
+	}()
+
+	discard := func(err error) {
+		pw.CloseWithError(err)
+	}
+
+	return pw, discard, done
+}
+
+// stripWindowsLayer strips the "Files/" prefix and Windows-specific metadata
+// from a Windows-format tar stream to produce a standard Linux-format tar.
+// This is the inverse of makeWindowsLayer.
+func stripWindowsLayer(ctx context.Context, w io.Writer) (io.Writer, func(error), chan error) {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+
+	go func() {
+		tarReader := tar.NewReader(pr)
+		tarWriter := tar.NewWriter(w)
+
+		err := func() error {
+			for {
+				h, err := tarReader.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return err
+				}
+
+				if after, ok := strings.CutPrefix(h.Name, "Files/"); ok {
+					h.Name = after
+					h.Linkname = strings.TrimPrefix(h.Linkname, "Files/")
+
+					// Remove Windows-specific PAX records
+					delete(h.PAXRecords, keyFileAttr)
+					delete(h.PAXRecords, keySDRaw)
+					delete(h.PAXRecords, keyCreationTime)
+
+					if err := tarWriter.WriteHeader(h); err != nil {
+						return err
+					}
+					if h.Size > 0 {
+						//nolint:gosec // never read into memory
+						if _, err := io.Copy(tarWriter, tarReader); err != nil {
+							return err
+						}
+					}
+				} else if h.Size > 0 {
+					// Discard non-Files entries (e.g., Hives/)
+					//nolint:gosec // never read into memory
+					if _, err := io.Copy(io.Discard, tarReader); err != nil {
+						return err
+					}
+				}
+			}
+			return tarWriter.Close()
+		}()
+		if err != nil {
+			bklog.G(ctx).Errorf("stripWindowsLayer %+v", err)
 		}
 		pw.CloseWithError(err)
 		done <- err
