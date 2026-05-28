@@ -1715,7 +1715,7 @@ func checkProgressStream(t *testing.T, sb integration.Sandbox, lintTest *lintTes
 
 	platformStr := integration.UnixOrWindows(
 		"linux/amd64,linux/arm64",
-		"windows/amd64",
+		"windows/"+runtime.GOARCH,
 	)
 	attrs := lintTest.FrontendAttrs
 	if attrs == nil {
