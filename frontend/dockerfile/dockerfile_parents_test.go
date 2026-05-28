@@ -1,8 +1,10 @@
 package dockerfile
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/containerd/continuity/fs/fstest"
@@ -211,6 +213,11 @@ RUN if not exist \out\c\d\e\bar exit /b 1
 `,
 	))
 
+	// nanoserver:ltsc2022 has no ARM64 manifest; use ltsc2025-arm64 on ARM64.
+	if runtime.GOARCH == "arm64" {
+		dockerfile = bytes.ReplaceAll(dockerfile, []byte("nanoserver:ltsc2022"), []byte("nanoserver:ltsc2025-arm64"))
+	}
+
 	dir := integration.Tmpdir(
 		t,
 		fstest.CreateFile("Dockerfile", dockerfile, 0600),
@@ -325,6 +332,11 @@ RUN if exist \out\a exit /b 1
 RUN if exist \out\c exit /b 1
 `,
 	))
+
+	// nanoserver:ltsc2022 has no ARM64 manifest; use ltsc2025-arm64 on ARM64.
+	if runtime.GOARCH == "arm64" {
+		dockerfile = bytes.ReplaceAll(dockerfile, []byte("nanoserver:ltsc2022"), []byte("nanoserver:ltsc2025-arm64"))
+	}
 
 	dir := integration.Tmpdir(
 		t,
