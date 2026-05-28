@@ -29,6 +29,7 @@ import (
 	"github.com/moby/buildkit/util/contentutil"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/semaphore"
 )
@@ -252,7 +253,13 @@ func Run(t *testing.T, testCases []Test, opt ...TestOpt) {
 						}()
 						tc.Run(t, sb)
 					})
-					require.True(t, ok)
+					if runtime.GOOS == "windows" {
+						// On Windows tests run sequentially (t.Parallel disabled).
+						// Use assert so one subtest failure doesn't kill remaining tests.
+						assert.True(t, ok)
+					} else {
+						require.True(t, ok)
+					}
 				}(fn, name, br, tc, mv)
 			}
 		}
@@ -573,6 +580,19 @@ func SkipOnPlatform(t *testing.T, goos string, reason ...string) {
 			t.Skipf("Skipped on %s: %s", goos, strings.Join(reason, " "))
 		} else {
 			t.Skipf("Skipped on %s", goos)
+		}
+	}
+}
+
+// SkipOnPlatformArch skips the test if runtime.GOOS and runtime.GOARCH
+// match the given values.
+func SkipOnPlatformArch(t *testing.T, goos, goarch string, reason ...string) {
+	t.Helper()
+	if runtime.GOOS == goos && runtime.GOARCH == goarch {
+		if len(reason) > 0 {
+			t.Skipf("Skipped on %s/%s: %s", goos, goarch, strings.Join(reason, " "))
+		} else {
+			t.Skipf("Skipped on %s/%s", goos, goarch)
 		}
 	}
 }
