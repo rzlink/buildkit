@@ -382,6 +382,10 @@ RUN --mount=target=/root/.cache,type=cache\
     --mount=target=/go/pkg/mod,type=cache <<EOT
   set -ex
   mkdir /out
+  if [ "$(xx-info os)" = "windows" ] && [ "$(xx-info arch)" = "arm64" ]; then
+    echo "WARN: dlv is not supported on windows/arm64, skipping"
+    exit 0
+  fi
   if [ "$(xx-info os)" = "freebsd" ]; then
     echo "WARN: dlv requires cgo enabled on FreeBSD, skipping: https://github.com/moby/buildkit/pull/5497#issuecomment-2462031339"
     exit 0
