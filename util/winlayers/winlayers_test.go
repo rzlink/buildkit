@@ -92,6 +92,16 @@ func readTar(t *testing.T, r io.Reader) []tarEntry {
 	return entries
 }
 
+// findEntry returns the tar entry with the given name, or nil.
+func findEntry(entries []tarEntry, name string) *tarEntry {
+	for i := range entries {
+		if entries[i].header.Name == name {
+			return &entries[i]
+		}
+	}
+	return nil
+}
+
 func TestFilterStripFilesPrefix(t *testing.T) {
 	// Create a Windows-format tar with Hives/ and Files/ directories
 	windowsTar := makeTar(t, []tarEntry{
@@ -177,7 +187,8 @@ func TestWrapLinuxToWindows(t *testing.T) {
 	assert.Equal(t, "Files/etc", entries[4].header.Name)
 
 	assert.Equal(t, "Files/lib", entries[5].header.Name)
-	assert.Equal(t, "Files/usr/lib", entries[5].header.Linkname)
+	// Relative linknames are preserved verbatim.
+	assert.Equal(t, "usr/lib", entries[5].header.Linkname)
 
 	// Check Windows-specific PAX records were added
 	for _, e := range entries {
@@ -401,6 +412,72 @@ func TestWrapLinuxToWindowsSpecialChars(t *testing.T) {
 	assert.Equal(t, "Files/path with spaces/file name.txt", entries[3].header.Name)
 	assert.Equal(t, "Files/café", entries[4].header.Name)
 	assert.Equal(t, "Files/café/données.txt", entries[5].header.Name)
+}
+
+func TestWrapLinuxToWindowsSkipsNTFSInvalidNames(t *testing.T) {
+	// Debian/Ubuntu base images carry dpkg multiarch metadata with ':' in
+	// filenames, which NTFS forbids; such entries are dropped with a warning.
+	largeBody := bytes.Repeat([]byte("x"), 4096)
+	linuxTar := makeTar(t, []tarEntry{
+		{header: &tar.Header{Name: "var", Typeflag: tar.TypeDir}},
+		{header: &tar.Header{Name: "var/lib", Typeflag: tar.TypeDir}},
+		{header: &tar.Header{Name: "var/lib/dpkg", Typeflag: tar.TypeDir}},
+		{header: &tar.Header{Name: "var/lib/dpkg/info", Typeflag: tar.TypeDir}},
+		// Should be dropped: colon in filename
+		{header: &tar.Header{Name: "var/lib/dpkg/info/gcc-12-base:amd64.list", Typeflag: tar.TypeReg, Size: int64(len(largeBody))}, data: largeBody},
+		// Should be dropped: other reserved chars
+		{header: &tar.Header{Name: "weird?name.txt", Typeflag: tar.TypeReg, Size: 3}, data: []byte("abc")},
+		{header: &tar.Header{Name: "pipe|file", Typeflag: tar.TypeReg, Size: 3}, data: []byte("xyz")},
+		// Kept; also confirms the dropped large body was drained from the reader.
+		{header: &tar.Header{Name: "etc", Typeflag: tar.TypeDir}},
+		{header: &tar.Header{Name: "etc/os-release", Typeflag: tar.TypeReg, Size: 5}, data: []byte("hello")},
+	})
+
+	ctx := context.Background()
+	r, discard, done := wrapLinuxToWindows(ctx, bytes.NewReader(linuxTar))
+
+	entries := readTar(t, r)
+	discard(nil)
+	require.NoError(t, <-done)
+
+	// Hives/, Files/, Files/var, Files/var/lib, Files/var/lib/dpkg,
+	// Files/var/lib/dpkg/info, Files/etc, Files/etc/os-release
+	require.Len(t, entries, 8)
+
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.header.Name
+	}
+	assert.NotContains(t, names, "Files/var/lib/dpkg/info/gcc-12-base:amd64.list")
+	assert.NotContains(t, names, "Files/weird?name.txt")
+	assert.NotContains(t, names, "Files/pipe|file")
+
+	// Verify the legal entry after the dropped large body survived intact
+	osRelease := entries[len(entries)-1]
+	assert.Equal(t, "Files/etc/os-release", osRelease.header.Name)
+	assert.Equal(t, []byte("hello"), osRelease.data)
+}
+
+func TestNTFSInvalidPathReason(t *testing.T) {
+	tests := []struct {
+		name string
+		bad  bool
+	}{
+		{"plain/path/file.txt", false},
+		{"café/données.txt", false},
+		{"path with spaces/file name.txt", false},
+		{"var/lib/dpkg/info/gcc-12-base:amd64.list", true},
+		{"weird?file", true},
+		{"<bracket>", true},
+		{`pipe|file`, true},
+		{`quoted"file`, true},
+		{"star*file", true},
+		{"ctrl\x01char", true},
+	}
+	for _, tc := range tests {
+		_, got := ntfsInvalidPathReason(tc.name)
+		assert.Equal(t, tc.bad, got, "name=%q", tc.name)
+	}
 }
 
 func TestStripWindowsLayerPreservesNonWindowsPAX(t *testing.T) {
@@ -704,4 +781,103 @@ func TestCompareDispatch(t *testing.T) {
 		assert.Equal(t, 1, mock.calls,
 			"unknown layer OS should not trigger any transformation")
 	})
+}
+
+func TestRelPath(t *testing.T) {
+	for _, tc := range []struct {
+		from, to, want string
+	}{
+		{"Files/etc", "Files/usr/lib/os-release", "../usr/lib/os-release"},
+		{"Files/usr/lib", "Files/lib/libc.so.6", "../../lib/libc.so.6"},
+		{"Files", "Files/bin/sh", "bin/sh"},
+		{"Files/a/b/c", "Files/a/b/c/d", "d"},
+		{"Files/a/b/c", "Files/a/b", ".."},
+		{"Files/a/b", "Files/a/b", "."},
+	} {
+		got := relPath(tc.from, tc.to)
+		assert.Equal(t, tc.want, got, "from=%q to=%q", tc.from, tc.to)
+	}
+}
+
+func TestRewriteWrappedLinkname(t *testing.T) {
+	for _, tc := range []struct {
+		typeflag                    byte
+		wrappedName, linkname, want string
+	}{
+		// Relative symlinks: untouched (regression for ubuntu /etc/os-release).
+		{tar.TypeSymlink, "Files/etc/os-release", "../usr/lib/os-release", "../usr/lib/os-release"},
+		{tar.TypeSymlink, "Files/usr/bin/python3", "python3.11", "python3.11"},
+		{tar.TypeSymlink, "Files/lib/link", "../lib64/target", "../lib64/target"},
+		// Non-link entries: untouched.
+		{tar.TypeReg, "Files/etc/passwd", "", ""},
+		// Absolute symlinks: re-rooted relative to symlink's wrapped dir.
+		{tar.TypeSymlink, "Files/etc/os-release", "/usr/lib/os-release", "../usr/lib/os-release"},
+		{tar.TypeSymlink, "Files/usr/lib/libc.so.6", "/lib/libc.so.6", "../../lib/libc.so.6"},
+		{tar.TypeSymlink, "Files/entrypoint", "/bin/sh", "bin/sh"},
+		{tar.TypeSymlink, "Files/bin/sh", "/bin/busybox", "busybox"},
+		// Hardlinks: linkname is a tar entry name, must keep Files/ prefix.
+		{tar.TypeLink, "Files/usr/bin/perl5.34.0", "usr/bin/perl", "Files/usr/bin/perl"},
+		{tar.TypeLink, "Files/bin/sh", "bin/bash", "Files/bin/bash"},
+	} {
+		got := rewriteWrappedLinkname(tc.typeflag, tc.wrappedName, tc.linkname)
+		assert.Equal(t, tc.want, got, "type=%d wrappedName=%q linkname=%q", tc.typeflag, tc.wrappedName, tc.linkname)
+	}
+}
+
+func TestWrapLinuxToWindowsLinkRewrite(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries []tarEntry
+		lookup  string
+		want    string
+	}{
+		{
+			// Regression: ubuntu /etc/os-release -> ../usr/lib/os-release.
+			name: "relative symlink preserved",
+			entries: []tarEntry{
+				{header: &tar.Header{Name: "usr/lib/os-release", Typeflag: tar.TypeReg, Size: 5}, data: []byte("hello")},
+				{header: &tar.Header{Name: "etc/os-release", Typeflag: tar.TypeSymlink, Linkname: "../usr/lib/os-release"}},
+			},
+			lookup: "Files/etc/os-release",
+			want:   "../usr/lib/os-release",
+		},
+		{
+			name: "absolute symlink rerooted",
+			entries: []tarEntry{
+				{header: &tar.Header{Name: "lib/libc.so.6", Typeflag: tar.TypeReg, Size: 3}, data: []byte("abc")},
+				{header: &tar.Header{Name: "usr/lib/libc.so.6", Typeflag: tar.TypeSymlink, Linkname: "/lib/libc.so.6"}},
+			},
+			lookup: "Files/usr/lib/libc.so.6",
+			want:   "../../lib/libc.so.6",
+		},
+		{
+			name: "absolute symlink at root",
+			entries: []tarEntry{
+				{header: &tar.Header{Name: "bin/sh", Typeflag: tar.TypeReg, Size: 3}, data: []byte("xyz")},
+				{header: &tar.Header{Name: "entrypoint", Typeflag: tar.TypeSymlink, Linkname: "/bin/sh"}},
+			},
+			lookup: "Files/entrypoint",
+			want:   "bin/sh",
+		},
+		{
+			name: "hardlink keeps prefix",
+			entries: []tarEntry{
+				{header: &tar.Header{Name: "usr/bin/perl", Typeflag: tar.TypeReg, Size: 3}, data: []byte("abc")},
+				{header: &tar.Header{Name: "usr/bin/perl5.34.0", Typeflag: tar.TypeLink, Linkname: "usr/bin/perl"}},
+			},
+			lookup: "Files/usr/bin/perl5.34.0",
+			want:   "Files/usr/bin/perl",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, discard, done := wrapLinuxToWindows(context.Background(), bytes.NewReader(makeTar(t, tc.entries)))
+			entries := readTar(t, r)
+			discard(nil)
+			require.NoError(t, <-done)
+
+			link := findEntry(entries, tc.lookup)
+			require.NotNil(t, link, "wrapped entry %q missing", tc.lookup)
+			assert.Equal(t, tc.want, link.header.Linkname)
+		})
+	}
 }

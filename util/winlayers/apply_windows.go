@@ -5,6 +5,7 @@ package winlayers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -143,6 +144,16 @@ func createLayerVhds(ctx context.Context, snapshotDir string) error {
 
 	if err := computestorage.FormatWritableLayerVhd(ctx, windows.Handle(handle)); err != nil {
 		os.Remove(baseVhd)
+		// CFA silently blocks raw VHD sector writes; surface a hint
+		// because the underlying ACCESS_DENIED is otherwise opaque.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return fmt.Errorf("failed to format base vhdx %s: %w\n"+
+				"NOTE: ACCESS_DENIED from HcsFormatWritableLayerVhd is almost always Windows Defender "+
+				"Controlled Folder Access blocking raw VHD sector writes. Allow-list BOTH "+
+				"buildkitd.exe AND containerd.exe (and restart each) with:\n"+
+				"  Add-MpPreference -ControlledFolderAccessAllowedApplications <path-to-exe>",
+				baseVhd, err)
+		}
 		return fmt.Errorf("failed to format base vhdx %s: %w", baseVhd, err)
 	}
 	if err := syscall.CloseHandle(handle); err != nil {

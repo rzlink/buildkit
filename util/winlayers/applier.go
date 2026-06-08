@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -193,6 +194,60 @@ func (s *winApplier) applyLinuxLayer(ctx context.Context, desc ocispecs.Descript
 	return ocidesc, nil
 }
 
+// ntfsInvalidPathReason reports whether a forward-slash tar entry path
+// contains a byte NTFS forbids in filename components: <>:"|?* or any
+// control character (0x00-0x1F). Forward-slash separators are allowed.
+func ntfsInvalidPathReason(name string) (string, bool) {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch c {
+		case '<', '>', ':', '"', '|', '?', '*':
+			return "contains NTFS-reserved character " + string(c), true
+		}
+		if c < 0x20 {
+			return "contains control character", true
+		}
+	}
+	return "", false
+}
+
+// rewriteWrappedLinkname adjusts a link target for the "Files/"-rooted
+// layout. Hardlinks name another (prefixed) tar entry, so they keep the
+// prefix. Symlink targets are POSIX paths: relative ones are preserved,
+// absolute ones are re-rooted under "Files/" relative to the link's dir.
+func rewriteWrappedLinkname(typeflag byte, wrappedName, linkname string) string {
+	if linkname == "" {
+		return linkname
+	}
+	if typeflag == tar.TypeLink {
+		return "Files/" + linkname
+	}
+	if !strings.HasPrefix(linkname, "/") {
+		return linkname
+	}
+	return relPath(path.Dir(wrappedName), "Files"+linkname)
+}
+
+// relPath returns a forward-slash relative path from directory "from" to
+// "to". Both inputs use forward slashes; leading slashes are ignored.
+func relPath(from, to string) string {
+	fromParts := strings.Split(strings.Trim(from, "/"), "/")
+	toParts := strings.Split(strings.Trim(to, "/"), "/")
+	i := 0
+	for i < len(fromParts) && i < len(toParts) && fromParts[i] == toParts[i] {
+		i++
+	}
+	parts := make([]string, 0, len(fromParts)+len(toParts)-2*i)
+	for j := i; j < len(fromParts); j++ {
+		parts = append(parts, "..")
+	}
+	parts = append(parts, toParts[i:]...)
+	if len(parts) == 0 {
+		return "."
+	}
+	return strings.Join(parts, "/")
+}
+
 // wrapLinuxToWindows transforms a Linux-format tar stream into a Windows-format
 // tar stream by adding "Hives/" and "Files/" directories, prefixing all entries
 // with "Files/", and adding Windows PAX headers and security descriptors.
@@ -234,10 +289,22 @@ func wrapLinuxToWindows(ctx context.Context, in io.Reader) (io.Reader, func(erro
 				if err != nil {
 					return err
 				}
-				h.Name = "Files/" + h.Name
-				if h.Linkname != "" {
-					h.Linkname = "Files/" + h.Linkname
+				if reason, bad := ntfsInvalidPathReason(h.Name); bad {
+					// NTFS forbids bytes Linux allows (e.g. ':' in Debian dpkg
+					// multiarch metadata). hcsshim rejects the whole layer on any
+					// invalid entry, so drop the offending ones with a warning;
+					// the layer stays usable as a COPY --from=<linux> source for
+					// files with NTFS-legal names.
+					bklog.G(ctx).Warnf("wrapLinuxToWindows: skipping NTFS-incompatible tar entry %q (%s)", h.Name, reason)
+					if h.Size > 0 {
+						if _, err := io.Copy(io.Discard, tarReader); err != nil {
+							return err
+						}
+					}
+					continue
 				}
+				h.Name = "Files/" + h.Name
+				h.Linkname = rewriteWrappedLinkname(h.Typeflag, h.Name, h.Linkname)
 				prepareWinHeader(h)
 				addSecurityDescriptor(h)
 				if err := tarWriter.WriteHeader(h); err != nil {
