@@ -14,6 +14,10 @@ import (
 	"github.com/pkg/errors"
 )
 
+// windowsSSHAgentPipe is the fixed named pipe that Windows OpenSSH uses to
+// reach the SSH agent. It is the default SSH mount target on Windows.
+const windowsSSHAgentPipe = `\\.\pipe\openssh-ssh-agent`
+
 func NewExecOp(base State, proxyEnv *ProxyEnv, readOnly bool, c Constraints) *ExecOp {
 	e := &ExecOp{base: base, constraints: c, proxyEnv: proxyEnv}
 	root := base.Output()
@@ -153,13 +157,41 @@ func (e *ExecOp) Marshal(ctx context.Context, c *Constraints) (digest.Digest, []
 	}
 
 	if len(e.ssh) > 0 {
+		os := "linux"
+		if c.Platform != nil {
+			os = c.Platform.OS
+		} else if e.constraints.Platform != nil {
+			os = e.constraints.Platform.OS
+		}
 		for i, s := range e.ssh {
 			if s.Target == "" {
-				e.ssh[i].Target = fmt.Sprintf("/run/buildkit/ssh_agent.%d", i)
+				if os == "windows" {
+					// Windows OpenSSH always connects to this fixed named pipe
+					// and ignores SSH_AUTH_SOCK.
+					e.ssh[i].Target = windowsSSHAgentPipe
+				} else {
+					e.ssh[i].Target = fmt.Sprintf("/run/buildkit/ssh_agent.%d", i)
+				}
 			}
 		}
-		if _, ok := env.Get("SSH_AUTH_SOCK"); !ok {
-			env = env.AddOrReplace("SSH_AUTH_SOCK", e.ssh[0].Target)
+		// On Windows every SSH mount maps to a named pipe destination, and there
+		// is no per-mount default like the Unix ssh_agent.N sockets. Two mounts
+		// sharing a destination (e.g. multiple mounts defaulting to the OpenSSH
+		// agent pipe) would silently collide, so reject duplicates explicitly.
+		if os == "windows" {
+			seen := make(map[string]struct{}, len(e.ssh))
+			for _, s := range e.ssh {
+				if _, ok := seen[s.Target]; ok {
+					return "", nil, nil, nil, errors.Errorf("multiple SSH mounts target the same Windows pipe %q; specify a distinct target for each", s.Target)
+				}
+				seen[s.Target] = struct{}{}
+			}
+		}
+		// Windows OpenSSH ignores SSH_AUTH_SOCK, so only set it on other platforms.
+		if os != "windows" {
+			if _, ok := env.Get("SSH_AUTH_SOCK"); !ok {
+				env = env.AddOrReplace("SSH_AUTH_SOCK", e.ssh[0].Target)
+			}
 		}
 	}
 	if c.Caps != nil {
