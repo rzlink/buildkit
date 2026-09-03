@@ -115,9 +115,18 @@ echo "VMSS identity ($VMSS_IDENTITY) granted Key Vault secret read access."
 echo ""
 echo ">>> Step 6: Installing startup script extension..."
 
-# Encode startup script as base64 for inline delivery
-STARTUP_B64=$(base64 -w0 "$SCRIPT_DIR/startup.ps1")
+# Upload startup.ps1 to blob storage (Entra auth, no shared key)
+echo "Uploading startup.ps1 to blob storage..."
+az storage blob upload \
+  --account-name bkarm64scripts \
+  --container-name scripts \
+  --name startup.ps1 \
+  --file "$SCRIPT_DIR/startup.ps1" \
+  --overwrite \
+  --auth-mode login \
+  --output none
 
+# Configure CSE to download via VMSS managed identity (no SAS URLs)
 az vmss extension set \
   --resource-group "$RG" \
   --vmss-name "$VMSS_NAME" \
@@ -125,11 +134,13 @@ az vmss extension set \
   --publisher Microsoft.Compute \
   --version 1.10 \
   --settings "{
-    \"commandToExecute\": \"powershell -ExecutionPolicy Bypass -EncodedCommand $STARTUP_B64\"
+    \"fileUris\": [\"https://bkarm64scripts.blob.core.windows.net/scripts/startup.ps1\"],
+    \"commandToExecute\": \"powershell -ExecutionPolicy Bypass -File startup.ps1\"
   }" \
+  --protected-settings "{\"managedIdentity\": {}}" \
   --output table
 
-echo "Startup script extension configured."
+echo "Startup script extension configured (managed identity auth)."
 
 # Step 7: Configure auto-scaling (basic CPU-based, as fallback to webhook)
 echo ""
