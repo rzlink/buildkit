@@ -67,6 +67,8 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # ─── Helper functions ────────────────────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 log()   { echo -e "${CYAN}[$(date +%H:%M:%S)]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[$(date +%H:%M:%S)] ⚠${NC}  $*"; }
 err()   { echo -e "${RED}[$(date +%H:%M:%S)] ✗${NC}  $*" >&2; }
@@ -76,6 +78,47 @@ usage() {
     sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \?//'
     sed -n '/^# Options:/,/^[^#]/p' "$0" | sed 's/^# \?//' | head -n -1
     exit 0
+}
+
+# Refresh the VMSS Custom Script Extension with the latest startup.ps1.
+# Uploads to blob storage (Entra auth) and configures CSE to download via
+# VMSS managed identity — no SAS URLs or shared key access needed.
+refresh_cse() {
+    local startup_script="$SCRIPT_DIR/startup.ps1"
+    if [[ ! -f "$startup_script" ]]; then
+        warn "startup.ps1 not found at $startup_script — skipping CSE refresh"
+        return 0
+    fi
+    log "Uploading startup.ps1 to blob storage..."
+    if ! az storage blob upload \
+        --account-name bkarm64scripts \
+        --container-name scripts \
+        --name startup.ps1 \
+        --file "$startup_script" \
+        --overwrite \
+        --auth-mode login \
+        -o none 2>/dev/null; then
+        warn "Failed to upload startup.ps1 — instances will use existing version"
+        return 0
+    fi
+    log "Refreshing VMSS startup script extension..."
+    if az vmss extension set \
+        --resource-group "$RESOURCE_GROUP" \
+        --vmss-name "$VMSS_NAME" \
+        --name CustomScriptExtension \
+        --publisher Microsoft.Compute \
+        --version 1.10 \
+        --settings "{
+            \"fileUris\": [\"https://bkarm64scripts.blob.core.windows.net/scripts/startup.ps1\"],
+            \"commandToExecute\": \"powershell -ExecutionPolicy Bypass -File startup.ps1\"
+        }" \
+        --protected-settings "{\"managedIdentity\": {}}" \
+        --force-update \
+        -o none 2>/dev/null; then
+        ok "VMSS startup script extension updated"
+    else
+        warn "CSE refresh failed — instances may use stale startup script"
+    fi
 }
 
 # ─── Failure notification (called on early script failures) ──────────────────
@@ -312,6 +355,9 @@ fi
 if [[ "$NO_SCALE_UP" == true ]]; then
     log "Skipping scale-up (--no-scale-up)"
 else
+    # Ensure VMSS has the latest startup script before scaling up
+    refresh_cse
+
     SCALE_MAX_RETRIES=3
     SCALE_RETRY_DELAY=300  # 5 minutes
     SCALE_SUCCESS=false
