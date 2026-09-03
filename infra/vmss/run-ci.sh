@@ -353,7 +353,7 @@ else
                 SCALE_SUCCESS=true
                 ACTIVE_SKU="$SKU"
                 break 2
-            elif echo "$SCALE_OUTPUT" | grep -qi "SkuNotAvailable\|OverconstrainedAllocationRequest"; then
+            elif echo "$SCALE_OUTPUT" | grep -qi "SkuNotAvailable\|OverconstrainedAllocationRequest\|AllocationFailed"; then
                 warn "SKU $SKU not available in this region — trying next SKU"
                 break  # deterministic; retrying won't help
             elif echo "$SCALE_OUTPUT" | grep -qi "capacity\|quota\|throttl"; then
