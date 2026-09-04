@@ -16,6 +16,7 @@
 #   --ref BRANCH       Git ref to test (default: current branch)
 #   --arm64-only       Only run ARM64 tests (sets arm64_only=true)
 #   --filter REGEX     ARM64 test name filter (e.g. "TestFoo|TestBar")
+#   --frontend NAME    ARM64 frontend subtest filter (builtin or client)
 #   --no-scale-down    Skip scale-down after completion (for debugging)
 #   --no-scale-up      Skip scale-up (assume VMSS already running)
 #   --no-sync          Skip upstream sync and rebase
@@ -48,6 +49,7 @@ CAPACITY=12
 REF=""
 ARM64_ONLY="false"
 TEST_FILTER=""
+TEST_FRONTEND=""
 NO_SCALE_DOWN=false
 NO_SCALE_UP=false
 NO_SYNC=false
@@ -193,6 +195,7 @@ while [[ $# -gt 0 ]]; do
         --ref)            REF="$2"; shift 2 ;;
         --arm64-only)     ARM64_ONLY="true"; shift ;;
         --filter)         TEST_FILTER="$2"; shift 2 ;;
+        --frontend)       TEST_FRONTEND="$2"; shift 2 ;;
         --no-scale-down)  NO_SCALE_DOWN=true; shift ;;
         --no-scale-up)    NO_SCALE_UP=true; shift ;;
         --no-sync)        NO_SYNC=true; shift ;;
@@ -248,6 +251,7 @@ printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Ref:" "$REF"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Capacity:" "$CAPACITY instances"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "ARM64 only:" "$ARM64_ONLY"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Test filter:" "${TEST_FILTER:-<none>}"
+printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Frontend:" "${TEST_FRONTEND:-<both>}"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Scale down:" "$([[ $NO_SCALE_DOWN == true ]] && echo 'disabled' || echo 'auto')"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Sync/rebase:" "$([[ $NO_SYNC == true ]] && echo 'disabled' || echo 'enabled')"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Notify:" "$([[ $NO_NOTIFY == true ]] && echo 'disabled' || ([[ -n "$WEBHOOK_URL" ]] && echo 'Teams webhook' || echo '(none)'))"
@@ -477,6 +481,9 @@ DISPATCH_ARGS=("--ref" "$REF")
 DISPATCH_ARGS+=("-f" "arm64_only=$ARM64_ONLY")
 if [[ -n "$TEST_FILTER" ]]; then
     DISPATCH_ARGS+=("-f" "arm64_test_filter=$TEST_FILTER")
+fi
+if [[ -n "$TEST_FRONTEND" ]]; then
+    DISPATCH_ARGS+=("-f" "arm64_test_frontend=$TEST_FRONTEND")
 fi
 
 if ! gh workflow run "$WORKFLOW" "${DISPATCH_ARGS[@]}" 2>&1; then
