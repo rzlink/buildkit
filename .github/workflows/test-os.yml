@@ -300,6 +300,7 @@ jobs:
         env:
           TMPDIR: ${{ runner.temp }}
           SKIP_INTEGRATION_TESTS: ${{ matrix.skip-integration-tests }}
+          BUILDKIT_WINDOWS_MOUNT_RETRY_DEBUG: "1"
         run: |
           mkdir -p ./bin/testreports
           gotestsum \

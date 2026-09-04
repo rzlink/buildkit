@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"context"
 	"os"
 	"strings"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/Microsoft/go-winio/pkg/bindfilter"
 	"github.com/containerd/containerd/v2/core/mount"
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/buildkit/util/bklog"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
@@ -56,10 +58,11 @@ func (lm *localMounter) Mount() (string, error) {
 		}
 	} else {
 		// see https://github.com/moby/buildkit/issues/5807
-		// if it's a race condition issue, do max 2 retries with some backoff
-		// should adjust the retries if this persists but 1 retry
-		// seems to be enough.
-		if err := mountWithRetries(m, dir, 2); err != nil {
+		retries := 2
+		if os.Getenv("BUILDKIT_WINDOWS_MOUNT_RETRY_DEBUG") == "1" {
+			retries = 8
+		}
+		if err := mountWithRetries(m, dir, retries); err != nil {
 			return "", errors.Wrapf(err, "failed to mount %v", m)
 		}
 	}
@@ -70,17 +73,50 @@ func (lm *localMounter) Mount() (string, error) {
 
 func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	errStr := "cannot access the file because it is being used by another process"
+	debug := os.Getenv("BUILDKIT_WINDOWS_MOUNT_RETRY_DEBUG") == "1"
 	backoff := 30 * time.Millisecond
+	if debug {
+		backoff = 50 * time.Millisecond
+	}
+	started := time.Now()
 	var err error
 
 	for i := range retries + 1 {
 		// i = 0 is first call and not a retry
+		attemptStarted := time.Now()
 		err = m.Mount(dir)
-		if err == nil || i == retries {
+		if err == nil {
+			if debug && i > 0 {
+				bklog.G(context.TODO()).WithFields(map[string]any{
+					"attempt":    i + 1,
+					"elapsed":    time.Since(started),
+					"mountTime":  time.Since(attemptStarted),
+					"source":     m.Source,
+					"target":     dir,
+					"retryCount": i,
+				}).Info("windows layer mount succeeded after sharing violation")
+			}
+			return nil
+		}
+		if i == retries {
 			return err
 		}
 		if strings.Contains(err.Error(), errStr) {
-			time.Sleep(time.Duration(i+1) * backoff)
+			delay := backoff << i
+			if delay > time.Second {
+				delay = time.Second
+			}
+			if debug {
+				bklog.G(context.TODO()).WithError(err).WithFields(map[string]any{
+					"attempt":   i + 1,
+					"delay":     delay,
+					"elapsed":   time.Since(started),
+					"mountTime": time.Since(attemptStarted),
+					"source":    m.Source,
+					"target":    dir,
+				}).Warn("windows layer mount sharing violation; retrying")
+			}
+			time.Sleep(delay)
 		} else {
 			return err
 		}
