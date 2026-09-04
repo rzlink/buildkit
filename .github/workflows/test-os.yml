@@ -301,6 +301,7 @@ jobs:
           TMPDIR: ${{ runner.temp }}
           SKIP_INTEGRATION_TESTS: ${{ matrix.skip-integration-tests }}
           BUILDKIT_WINDOWS_MOUNT_RETRY_DEBUG: "1"
+          BUILDKIT_WINDOWS_MOUNT_RETRY_LOG: ${{ github.workspace }}\bin\testreports\mount-retry-${{ matrix.iteration }}.log
         run: |
           mkdir -p ./bin/testreports
           gotestsum \

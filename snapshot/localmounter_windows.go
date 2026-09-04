@@ -2,8 +2,10 @@ package snapshot
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Microsoft/go-winio/pkg/bindfilter"
@@ -13,6 +15,8 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
+
+var mountRetryLogMu sync.Mutex
 
 func (lm *localMounter) Mount() (string, error) {
 	lm.mu.Lock()
@@ -87,6 +91,7 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 		err = m.Mount(dir)
 		if err == nil {
 			if debug && i > 0 {
+				writeMountRetryEvent("success", m, dir, i+1, time.Since(started), time.Since(attemptStarted), 0, nil)
 				bklog.G(context.TODO()).WithFields(map[string]any{
 					"attempt":    i + 1,
 					"elapsed":    time.Since(started),
@@ -99,6 +104,9 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 			return nil
 		}
 		if i == retries {
+			if debug {
+				writeMountRetryEvent("failed", m, dir, i+1, time.Since(started), time.Since(attemptStarted), 0, err)
+			}
 			return err
 		}
 		if strings.Contains(err.Error(), errStr) {
@@ -107,6 +115,7 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 				delay = time.Second
 			}
 			if debug {
+				writeMountRetryEvent("retry", m, dir, i+1, time.Since(started), time.Since(attemptStarted), delay, err)
 				bklog.G(context.TODO()).WithError(err).WithFields(map[string]any{
 					"attempt":   i + 1,
 					"delay":     delay,
@@ -123,6 +132,25 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	}
 
 	return err
+}
+
+func writeMountRetryEvent(event string, m mount.Mount, target string, attempt int, elapsed, mountTime, delay time.Duration, err error) {
+	path := os.Getenv("BUILDKIT_WINDOWS_MOUNT_RETRY_LOG")
+	if path == "" {
+		return
+	}
+
+	mountRetryLogMu.Lock()
+	defer mountRetryLogMu.Unlock()
+
+	f, openErr := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if openErr != nil {
+		return
+	}
+	defer f.Close()
+
+	fmt.Fprintf(f, "event=%s attempt=%d elapsed_ms=%d mount_ms=%d delay_ms=%d source=%q target=%q error=%q\n",
+		event, attempt, elapsed.Milliseconds(), mountTime.Milliseconds(), delay.Milliseconds(), m.Source, target, err)
 }
 
 func (lm *localMounter) Unmount() error {
