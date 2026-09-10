@@ -2,15 +2,19 @@ package snapshot
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Microsoft/go-winio/pkg/bindfilter"
 	"github.com/containerd/containerd/v2/core/mount"
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/locker"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
+
+var windowsLayerLocker = locker.New()
 
 func (lm *localMounter) Mount() (string, error) {
 	lm.mu.Lock()
@@ -59,7 +63,9 @@ func (lm *localMounter) Mount() (string, error) {
 		// if it's a race condition issue, do max 2 retries with some backoff
 		// should adjust the retries if this persists but 1 retry
 		// seems to be enough.
+		lm.lockWindowsLayer(m)
 		if err := mountWithRetries(m, dir, 2); err != nil {
+			lm.unlockWindowsLayer()
 			return "", errors.Wrapf(err, "failed to mount %v", m)
 		}
 	}
@@ -100,6 +106,7 @@ func (lm *localMounter) Unmount() error {
 		return errors.Wrapf(cerrdefs.ErrNotImplemented, "request to mount %d layers, only 1 is supported", len(lm.mounts))
 	}
 	m := lm.mounts[0]
+	defer lm.unlockWindowsLayer()
 
 	if lm.target != "" {
 		if m.Type == "bind" || m.Type == "rbind" {
@@ -129,4 +136,21 @@ func (lm *localMounter) Unmount() error {
 	}
 
 	return nil
+}
+
+func (lm *localMounter) lockWindowsLayer(m mount.Mount) {
+	// Different localMounter instances can otherwise activate and deactivate
+	// the same HCS layer concurrently, which causes ERROR_SHARING_VIOLATION.
+	key := strings.ToLower(filepath.Clean(m.Source))
+	windowsLayerLocker.Lock(key)
+	lm.layerLockKey = key
+}
+
+func (lm *localMounter) unlockWindowsLayer() {
+	if lm.layerLockKey == "" {
+		return
+	}
+	key := lm.layerLockKey
+	lm.layerLockKey = ""
+	windowsLayerLocker.Unlock(key)
 }
