@@ -17,6 +17,7 @@
 #   --arm64-only       Only run ARM64 tests (sets arm64_only=true)
 #   --filter REGEX     ARM64 test name filter (e.g. "TestFoo|TestBar")
 #   --frontend NAME    ARM64 frontend subtest filter (builtin or client)
+#   --hcs-mode MODE    HCS diagnostic mode (lifecycle, capture, or lock)
 #   --no-scale-down    Skip scale-down after completion (for debugging)
 #   --no-scale-up      Skip scale-up (assume VMSS already running)
 #   --no-sync          Skip upstream sync and rebase
@@ -50,6 +51,7 @@ REF=""
 ARM64_ONLY="false"
 TEST_FILTER=""
 TEST_FRONTEND=""
+HCS_DIAGNOSTIC_MODE="lifecycle"
 NO_SCALE_DOWN=false
 NO_SCALE_UP=false
 NO_SYNC=false
@@ -196,6 +198,7 @@ while [[ $# -gt 0 ]]; do
         --arm64-only)     ARM64_ONLY="true"; shift ;;
         --filter)         TEST_FILTER="$2"; shift 2 ;;
         --frontend)       TEST_FRONTEND="$2"; shift 2 ;;
+        --hcs-mode)       HCS_DIAGNOSTIC_MODE="$2"; shift 2 ;;
         --no-scale-down)  NO_SCALE_DOWN=true; shift ;;
         --no-scale-up)    NO_SCALE_UP=true; shift ;;
         --no-sync)        NO_SYNC=true; shift ;;
@@ -206,6 +209,11 @@ while [[ $# -gt 0 ]]; do
         *) err "Unknown option: $1"; usage ;;
     esac
 done
+
+case "$HCS_DIAGNOSTIC_MODE" in
+    lifecycle|capture|lock) ;;
+    *) err "Invalid --hcs-mode: $HCS_DIAGNOSTIC_MODE (expected lifecycle, capture, or lock)"; exit 1 ;;
+esac
 
 # Default ref to current branch
 if [[ -z "$REF" ]]; then
@@ -252,6 +260,7 @@ printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Capacity:" "$CAPACITY in
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "ARM64 only:" "$ARM64_ONLY"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Test filter:" "${TEST_FILTER:-<none>}"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Frontend:" "${TEST_FRONTEND:-<both>}"
+printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "HCS mode:" "$HCS_DIAGNOSTIC_MODE"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Scale down:" "$([[ $NO_SCALE_DOWN == true ]] && echo 'disabled' || echo 'auto')"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Sync/rebase:" "$([[ $NO_SYNC == true ]] && echo 'disabled' || echo 'enabled')"
 printf  "${BOLD}║${NC} %-14s %-30s${BOLD}║${NC}\n" "Notify:" "$([[ $NO_NOTIFY == true ]] && echo 'disabled' || ([[ -n "$WEBHOOK_URL" ]] && echo 'Teams webhook' || echo '(none)'))"
@@ -485,6 +494,7 @@ fi
 if [[ -n "$TEST_FRONTEND" ]]; then
     DISPATCH_ARGS+=("-f" "arm64_test_frontend=$TEST_FRONTEND")
 fi
+DISPATCH_ARGS+=("-f" "arm64_hcs_diagnostic_mode=$HCS_DIAGNOSTIC_MODE")
 
 if ! gh workflow run "$WORKFLOW" "${DISPATCH_ARGS[@]}" 2>&1; then
     err "Workflow dispatch failed"

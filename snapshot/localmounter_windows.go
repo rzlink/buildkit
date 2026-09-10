@@ -15,12 +15,14 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/buildkit/util/bklog"
+	"github.com/moby/locker"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
 
 var windowsMountDiagnosticMu sync.Mutex
 var windowsSharingViolationCaptureOnce sync.Once
+var windowsLayerOperationLocker = locker.New()
 
 type windowsMountDiagnosticEvent struct {
 	Timestamp   time.Time `json:"timestamp"`
@@ -101,7 +103,9 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	for i := range retries + 1 {
 		// i = 0 is first call and not a retry
 		writeWindowsMountDiagnostic("mount-attempt", m, dir, i+1, time.Since(started), nil)
-		err = m.Mount(dir)
+		err = withWindowsLayerOperationLock(m, dir, func() error {
+			return m.Mount(dir)
+		})
 		writeWindowsMountDiagnostic("mount-result", m, dir, i+1, time.Since(started), err)
 		if err == nil || i == retries {
 			return err
@@ -149,7 +153,9 @@ func (lm *localMounter) Unmount() error {
 			// call to bindfilter.RemoveFileBinding() (above), but this would operate under the
 			// assumption that the internal implementation in containerd will always be based on the
 			// bind filter, which feels brittle.
-			if err := mount.Unmount(target, 0); err != nil {
+			if err := withWindowsLayerOperationLock(m, target, func() error {
+				return mount.Unmount(target, 0)
+			}); err != nil {
 				writeWindowsMountDiagnostic("unmount-result", m, target, 0, 0, err)
 				return errors.Wrapf(err, "failed to unmount %v: %+v", target, err)
 			}
@@ -170,6 +176,10 @@ func (lm *localMounter) Unmount() error {
 }
 
 func captureWindowsSharingViolation(m mount.Mount, target string, mountErr error) {
+	if os.Getenv("BUILDKIT_WINDOWS_HANDLE_CAPTURE") != "true" {
+		return
+	}
+
 	dir := os.Getenv("BUILDKIT_WINDOWS_HANDLE_CAPTURE_DIR")
 	handleExe := os.Getenv("BUILDKIT_WINDOWS_HANDLE_EXE")
 	if dir == "" || handleExe == "" {
@@ -195,7 +205,7 @@ func captureWindowsSharingViolation(m mount.Mount, target string, mountErr error
 	if parentErr != nil {
 		metadata["parentPathsError"] = parentErr.Error()
 	}
-	writeWindowsDiagnosticJSON(filepath.Join(dir, "metadata.json"), metadata)
+	writeWindowsDiagnosticJSON(filepath.Join(dir, "metadata.txt"), metadata)
 
 	runWindowsDiagnosticCommand(dir, "handle-source.txt", handleExe, "-accepteula", "-nobanner", m.Source)
 	for i, parentPath := range parentPaths {
@@ -226,6 +236,31 @@ foreach ($log in $logs) {
   }
 }
 `)
+}
+
+func withWindowsLayerOperationLock(m mount.Mount, target string, fn func() error) (retErr error) {
+	if m.Type != "windows-layer" || os.Getenv("BUILDKIT_WINDOWS_LAYER_OPERATION_LOCK") != "true" {
+		return fn()
+	}
+
+	key := strings.ToLower(filepath.Clean(m.Source))
+	started := time.Now()
+	writeWindowsMountDiagnostic("layer-operation-lock-wait", m, target, 0, 0, nil)
+	windowsLayerOperationLocker.Lock(key)
+	writeWindowsMountDiagnostic("layer-operation-lock-acquired", m, target, 0, time.Since(started), nil)
+	defer func() {
+		unlockErr := windowsLayerOperationLocker.Unlock(key)
+		writeWindowsMountDiagnostic("layer-operation-lock-released", m, target, 0, time.Since(started), unlockErr)
+		if unlockErr != nil {
+			if retErr == nil {
+				retErr = unlockErr
+			} else {
+				bklog.G(context.TODO()).WithError(unlockErr).WithField("source", m.Source).Warn("failed to unlock Windows layer operation")
+			}
+		}
+	}()
+
+	return fn()
 }
 
 func runWindowsDiagnosticCommand(dir, name, command string, args ...string) {

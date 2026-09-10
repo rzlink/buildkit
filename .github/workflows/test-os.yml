@@ -27,6 +27,11 @@ on:
         required: false
         type: string
         default: ''
+      arm64_hcs_diagnostic_mode:
+        description: 'Named-context HCS mode: lifecycle, capture, or lock.'
+        required: false
+        type: string
+        default: 'lifecycle'
   push:
     branches:
       - 'master'
@@ -297,6 +302,7 @@ jobs:
           echo "${{ github.workspace }}\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       -
         name: Install HCS diagnostics
+        if: inputs.arm64_hcs_diagnostic_mode == 'capture'
         run: |
           $archive = Join-Path "${{ runner.temp }}" "Handle.zip"
           $tools = Join-Path "${{ runner.temp }}" "sysinternals-handle"
@@ -312,8 +318,10 @@ jobs:
           SKIP_INTEGRATION_TESTS: ${{ matrix.skip-integration-tests }}
           BUILDKIT_WINDOWS_MOUNT_DIAGNOSTIC_LOG: ${{ github.workspace }}\bin\testreports\mount-lifecycle-${{ matrix.iteration }}.jsonl
           BUILDKIT_NAMED_CONTEXT_PHASE_LOG: ${{ github.workspace }}\bin\testreports\named-context-phases-${{ matrix.iteration }}.jsonl
+          BUILDKIT_WINDOWS_HANDLE_CAPTURE: ${{ inputs.arm64_hcs_diagnostic_mode == 'capture' }}
           BUILDKIT_WINDOWS_HANDLE_EXE: ${{ runner.temp }}\sysinternals-handle\handle64a.exe
           BUILDKIT_WINDOWS_HANDLE_CAPTURE_DIR: ${{ github.workspace }}\bin\testreports\handle-capture-${{ matrix.iteration }}
+          BUILDKIT_WINDOWS_LAYER_OPERATION_LOCK: ${{ inputs.arm64_hcs_diagnostic_mode == 'lock' }}
         run: |
           mkdir -p ./bin/testreports
           gotestsum \
