@@ -1,16 +1,40 @@
 package snapshot
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Microsoft/go-winio/pkg/bindfilter"
 	"github.com/containerd/containerd/v2/core/mount"
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/buildkit/util/bklog"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
+
+var windowsMountDiagnosticMu sync.Mutex
+var windowsSharingViolationCaptureOnce sync.Once
+
+type windowsMountDiagnosticEvent struct {
+	Timestamp   time.Time `json:"timestamp"`
+	Event       string    `json:"event"`
+	PID         int       `json:"pid"`
+	Source      string    `json:"source"`
+	Target      string    `json:"target"`
+	Type        string    `json:"type"`
+	ReadOnly    bool      `json:"readOnly"`
+	ParentPaths []string  `json:"parentPaths,omitempty"`
+	Attempt     int       `json:"attempt,omitempty"`
+	ElapsedMS   int64     `json:"elapsedMs,omitempty"`
+	Error       string    `json:"error,omitempty"`
+}
 
 func (lm *localMounter) Mount() (string, error) {
 	lm.mu.Lock()
@@ -71,15 +95,21 @@ func (lm *localMounter) Mount() (string, error) {
 func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	errStr := "cannot access the file because it is being used by another process"
 	backoff := 30 * time.Millisecond
+	started := time.Now()
 	var err error
 
 	for i := range retries + 1 {
 		// i = 0 is first call and not a retry
+		writeWindowsMountDiagnostic("mount-attempt", m, dir, i+1, time.Since(started), nil)
 		err = m.Mount(dir)
+		writeWindowsMountDiagnostic("mount-result", m, dir, i+1, time.Since(started), err)
 		if err == nil || i == retries {
 			return err
 		}
 		if strings.Contains(err.Error(), errStr) {
+			windowsSharingViolationCaptureOnce.Do(func() {
+				captureWindowsSharingViolation(m, dir, err)
+			})
 			time.Sleep(time.Duration(i+1) * backoff)
 		} else {
 			return err
@@ -100,13 +130,16 @@ func (lm *localMounter) Unmount() error {
 		return errors.Wrapf(cerrdefs.ErrNotImplemented, "request to mount %d layers, only 1 is supported", len(lm.mounts))
 	}
 	m := lm.mounts[0]
+	target := lm.target
 
-	if lm.target != "" {
+	if target != "" {
+		writeWindowsMountDiagnostic("unmount-start", m, target, 0, 0, nil)
 		if m.Type == "bind" || m.Type == "rbind" {
-			if err := bindfilter.RemoveFileBinding(lm.target); err != nil {
+			if err := bindfilter.RemoveFileBinding(target); err != nil {
 				// The following two errors denote that lm.target is not a mount point.
 				if !errors.Is(err, windows.ERROR_INVALID_PARAMETER) && !errors.Is(err, windows.ERROR_NOT_FOUND) {
-					return errors.Wrapf(err, "failed to unmount %v: %+v", lm.target, err)
+					writeWindowsMountDiagnostic("unmount-result", m, target, 0, 0, err)
+					return errors.Wrapf(err, "failed to unmount %v: %+v", target, err)
 				}
 			}
 		} else {
@@ -116,17 +149,161 @@ func (lm *localMounter) Unmount() error {
 			// call to bindfilter.RemoveFileBinding() (above), but this would operate under the
 			// assumption that the internal implementation in containerd will always be based on the
 			// bind filter, which feels brittle.
-			if err := mount.Unmount(lm.target, 0); err != nil {
-				return errors.Wrapf(err, "failed to unmount %v: %+v", lm.target, err)
+			if err := mount.Unmount(target, 0); err != nil {
+				writeWindowsMountDiagnostic("unmount-result", m, target, 0, 0, err)
+				return errors.Wrapf(err, "failed to unmount %v: %+v", target, err)
 			}
 		}
-		os.RemoveAll(lm.target)
+		writeWindowsMountDiagnostic("unmount-result", m, target, 0, 0, nil)
+		os.RemoveAll(target)
 		lm.target = ""
 	}
 
 	if lm.release != nil {
-		return lm.release()
+		writeWindowsMountDiagnostic("release-start", m, target, 0, 0, nil)
+		err := lm.release()
+		writeWindowsMountDiagnostic("release-result", m, target, 0, 0, err)
+		return err
 	}
 
 	return nil
+}
+
+func captureWindowsSharingViolation(m mount.Mount, target string, mountErr error) {
+	dir := os.Getenv("BUILDKIT_WINDOWS_HANDLE_CAPTURE_DIR")
+	handleExe := os.Getenv("BUILDKIT_WINDOWS_HANDLE_EXE")
+	if dir == "" || handleExe == "" {
+		return
+	}
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		bklog.G(context.TODO()).WithError(err).WithField("path", dir).Warn("failed to create Windows handle capture directory")
+		return
+	}
+
+	parentPaths, parentErr := m.GetParentPaths()
+	metadata := map[string]any{
+		"timestamp":   time.Now().UTC(),
+		"pid":         os.Getpid(),
+		"source":      m.Source,
+		"target":      target,
+		"type":        m.Type,
+		"readOnly":    m.ReadOnly(),
+		"parentPaths": parentPaths,
+		"mountError":  mountErr.Error(),
+	}
+	if parentErr != nil {
+		metadata["parentPathsError"] = parentErr.Error()
+	}
+	writeWindowsDiagnosticJSON(filepath.Join(dir, "metadata.json"), metadata)
+
+	runWindowsDiagnosticCommand(dir, "handle-source.txt", handleExe, "-accepteula", "-nobanner", m.Source)
+	for i, parentPath := range parentPaths {
+		runWindowsDiagnosticCommand(dir, fmt.Sprintf("handle-parent-%d.txt", i+1), handleExe, "-accepteula", "-nobanner", parentPath)
+	}
+	runWindowsDiagnosticCommand(dir, "processes.txt", "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-Process | Sort-Object ProcessName | Select-Object Id,ProcessName,Path,StartTime | Format-List | Out-String -Width 4096")
+	runWindowsDiagnosticCommand(dir, "filter-drivers.txt", "fltmc.exe", "filters")
+	runWindowsDiagnosticCommand(dir, "filter-instances.txt", "fltmc.exe", "instances")
+	runWindowsDiagnosticCommand(dir, "defender-status.txt", "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+		"Get-MpComputerStatus | Format-List * | Out-String -Width 4096; Get-MpPreference | Format-List * | Out-String -Width 4096")
+	runWindowsDiagnosticCommand(dir, "events.txt", "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `
+$start = (Get-Date).AddMinutes(-5)
+$logs = @(
+  'Microsoft-Windows-Hyper-V-Compute-Admin',
+  'Microsoft-Windows-Containers-Wcifs/Operational',
+  'Microsoft-Windows-Windows Defender/Operational',
+  'System'
+)
+foreach ($log in $logs) {
+  "===== $log ====="
+  try {
+    Get-WinEvent -FilterHashtable @{LogName=$log; StartTime=$start} -ErrorAction Stop |
+      Select-Object TimeCreated,Id,LevelDisplayName,ProviderName,Message |
+      Format-List | Out-String -Width 4096
+  } catch {
+    "capture-error: $($_.Exception.Message)"
+  }
+}
+`)
+}
+
+func runWindowsDiagnosticCommand(dir, name, command string, args ...string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, command, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		output = append(output, []byte(fmt.Sprintf("\ncommand-error: %v\n", err))...)
+	}
+	if ctx.Err() != nil {
+		output = append(output, []byte(fmt.Sprintf("context-error: %v\n", ctx.Err()))...)
+	}
+
+	path := filepath.Join(dir, name)
+	if writeErr := os.WriteFile(path, output, 0600); writeErr != nil {
+		bklog.G(context.TODO()).WithError(writeErr).WithField("path", path).Warn("failed to write Windows diagnostic command output")
+	}
+}
+
+func writeWindowsDiagnosticJSON(path string, value any) {
+	dt, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		bklog.G(context.TODO()).WithError(err).WithField("path", path).Warn("failed to marshal Windows diagnostic metadata")
+		return
+	}
+	if err := os.WriteFile(path, dt, 0600); err != nil {
+		bklog.G(context.TODO()).WithError(err).WithField("path", path).Warn("failed to write Windows diagnostic metadata")
+	}
+}
+
+func writeWindowsMountDiagnostic(event string, m mount.Mount, target string, attempt int, elapsed time.Duration, eventErr error) {
+	path := os.Getenv("BUILDKIT_WINDOWS_MOUNT_DIAGNOSTIC_LOG")
+	if path == "" {
+		return
+	}
+
+	parentPaths, parentErr := m.GetParentPaths()
+	record := windowsMountDiagnosticEvent{
+		Timestamp:   time.Now().UTC(),
+		Event:       event,
+		PID:         os.Getpid(),
+		Source:      m.Source,
+		Target:      target,
+		Type:        m.Type,
+		ReadOnly:    m.ReadOnly(),
+		ParentPaths: parentPaths,
+		Attempt:     attempt,
+		ElapsedMS:   elapsed.Milliseconds(),
+	}
+	if eventErr != nil {
+		record.Error = eventErr.Error()
+	}
+	if parentErr != nil {
+		if record.Error != "" {
+			record.Error += "; "
+		}
+		record.Error += "failed to read parent paths: " + parentErr.Error()
+	}
+
+	dt, err := json.Marshal(record)
+	if err != nil {
+		bklog.G(context.TODO()).WithError(err).Warn("failed to marshal Windows mount diagnostic event")
+		return
+	}
+
+	windowsMountDiagnosticMu.Lock()
+	defer windowsMountDiagnosticMu.Unlock()
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		bklog.G(context.TODO()).WithError(err).WithField("path", path).Warn("failed to open Windows mount diagnostic log")
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.Write(append(dt, '\n')); err != nil {
+		bklog.G(context.TODO()).WithError(err).WithField("path", path).Warn("failed to write Windows mount diagnostic event")
+	}
 }

@@ -941,6 +941,7 @@ COPY --from=build /foo /out /
 func testNamedMultiplatformInputContext(t *testing.T, sb integration.Sandbox) {
 	workers.CheckFeatureCompat(t, sb, workers.FeatureMultiPlatform)
 	ctx := sb.Context()
+	logNamedContextPhase(t, "test-start")
 
 	// Two-platform matrix per OS. The "base" stage is built for both platforms,
 	// then fed back in as a named input context to a second Dockerfile.
@@ -1005,6 +1006,7 @@ COPY --from=build /foo /out /
 	f := getFrontend(t, sb)
 
 	b := func(ctx context.Context, c gateway.Client) (*gateway.Result, error) {
+		logNamedContextPhase(t, "first-solve-start")
 		res, err := f.SolveGateway(ctx, c, gateway.SolveRequest{
 			FrontendOpt: map[string]string{
 				"platform": platformAttr,
@@ -1013,6 +1015,7 @@ COPY --from=build /foo /out /
 		if err != nil {
 			return nil, err
 		}
+		logNamedContextPhase(t, "first-solve-complete")
 
 		if len(res.Refs) != 2 {
 			return nil, errors.Errorf("expected 2 refs, got %d", len(res.Refs))
@@ -1038,6 +1041,7 @@ COPY --from=build /foo /out /
 			return nil, err
 		}
 		inputs["base::"+platform2] = def.ToPB()
+		logNamedContextPhase(t, "named-inputs-ready")
 
 		frontendOpt := map[string]string{
 			"dockerfilekey":              dockerui.DefaultLocalNameDockerfile + "2",
@@ -1070,6 +1074,7 @@ COPY --from=build /foo /out /
 		}
 		frontendOpt["input-metadata:base::"+platform2] = string(dt)
 
+		logNamedContextPhase(t, "second-solve-start")
 		res, err = f.SolveGateway(ctx, c, gateway.SolveRequest{
 			FrontendOpt:    frontendOpt,
 			FrontendInputs: inputs,
@@ -1077,6 +1082,7 @@ COPY --from=build /foo /out /
 		if err != nil {
 			return nil, err
 		}
+		logNamedContextPhase(t, "second-solve-complete")
 		return res, nil
 	}
 
@@ -1084,6 +1090,7 @@ COPY --from=build /foo /out /
 
 	destDir := t.TempDir()
 
+	logNamedContextPhase(t, "build-and-local-export-start")
 	_, err = c.Build(ctx, client.SolveOpt{
 		LocalMounts: map[string]fsutil.FS{
 			dockerui.DefaultLocalNameDockerfile:       dir,
@@ -1098,6 +1105,7 @@ COPY --from=build /foo /out /
 		},
 	}, product, b, nil)
 	require.NoError(t, err)
+	logNamedContextPhase(t, "build-and-local-export-complete")
 
 	// cmd.exe's `echo` writes CRLF and preserves the space before `>`, so
 	// TrimSpace is used to normalize the output on Windows.
@@ -1116,6 +1124,25 @@ COPY --from=build /foo /out /
 	dt, err = os.ReadFile(filepath.Join(destDir, outDir2+"/foo"))
 	require.NoError(t, err)
 	require.Equal(t, "foo is bar-arm64", strings.TrimSpace(string(dt)))
+}
+
+func logNamedContextPhase(t *testing.T, phase string) {
+	t.Helper()
+
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	t.Logf("named-context phase=%s timestamp=%s", phase, timestamp)
+
+	path := os.Getenv("BUILDKIT_NAMED_CONTEXT_PHASE_LOG")
+	if path == "" {
+		return
+	}
+
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	require.NoError(t, err)
+	defer f.Close()
+
+	_, err = fmt.Fprintf(f, `{"timestamp":%q,"phase":%q}`+"\n", timestamp, phase)
+	require.NoError(t, err)
 }
 
 func testNamedFilteredContext(t *testing.T, sb integration.Sandbox) {
