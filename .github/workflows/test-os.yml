@@ -79,8 +79,6 @@ jobs:
           targets: binaries-for-test
           set: |
             *.platform=${{ matrix.platform }}
-            *.cache-from=type=gha,scope=binaries-for-test-${{ env.PLATFORM_PAIR }}
-            *.cache-to=type=gha,scope=binaries-for-test-${{ env.PLATFORM_PAIR }},repository=${{ github.repository }},ghtoken=${{ secrets.GITHUB_TOKEN }}
       -
         name: List artifacts
         run: |
