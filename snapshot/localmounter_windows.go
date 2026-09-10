@@ -85,7 +85,9 @@ func (lm *localMounter) Mount() (string, error) {
 		// if it's a race condition issue, do max 2 retries with some backoff
 		// should adjust the retries if this persists but 1 retry
 		// seems to be enough.
+		lm.lockWindowsLayer(m, dir)
 		if err := mountWithRetries(m, dir, 2); err != nil {
+			lm.unlockWindowsLayer(m, dir)
 			return "", errors.Wrapf(err, "failed to mount %v", m)
 		}
 	}
@@ -103,9 +105,7 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	for i := range retries + 1 {
 		// i = 0 is first call and not a retry
 		writeWindowsMountDiagnostic("mount-attempt", m, dir, i+1, time.Since(started), nil)
-		err = withWindowsLayerOperationLock(m, dir, func() error {
-			return m.Mount(dir)
-		})
+		err = m.Mount(dir)
 		writeWindowsMountDiagnostic("mount-result", m, dir, i+1, time.Since(started), err)
 		if err == nil || i == retries {
 			return err
@@ -135,6 +135,7 @@ func (lm *localMounter) Unmount() error {
 	}
 	m := lm.mounts[0]
 	target := lm.target
+	defer lm.unlockWindowsLayer(m, target)
 
 	if target != "" {
 		writeWindowsMountDiagnostic("unmount-start", m, target, 0, 0, nil)
@@ -153,9 +154,7 @@ func (lm *localMounter) Unmount() error {
 			// call to bindfilter.RemoveFileBinding() (above), but this would operate under the
 			// assumption that the internal implementation in containerd will always be based on the
 			// bind filter, which feels brittle.
-			if err := withWindowsLayerOperationLock(m, target, func() error {
-				return mount.Unmount(target, 0)
-			}); err != nil {
+			if err := mount.Unmount(target, 0); err != nil {
 				writeWindowsMountDiagnostic("unmount-result", m, target, 0, 0, err)
 				return errors.Wrapf(err, "failed to unmount %v: %+v", target, err)
 			}
@@ -238,9 +237,9 @@ foreach ($log in $logs) {
 `)
 }
 
-func withWindowsLayerOperationLock(m mount.Mount, target string, fn func() error) (retErr error) {
+func (lm *localMounter) lockWindowsLayer(m mount.Mount, target string) {
 	if m.Type != "windows-layer" || os.Getenv("BUILDKIT_WINDOWS_LAYER_OPERATION_LOCK") != "true" {
-		return fn()
+		return
 	}
 
 	key := strings.ToLower(filepath.Clean(m.Source))
@@ -248,19 +247,21 @@ func withWindowsLayerOperationLock(m mount.Mount, target string, fn func() error
 	writeWindowsMountDiagnostic("layer-operation-lock-wait", m, target, 0, 0, nil)
 	windowsLayerOperationLocker.Lock(key)
 	writeWindowsMountDiagnostic("layer-operation-lock-acquired", m, target, 0, time.Since(started), nil)
-	defer func() {
-		unlockErr := windowsLayerOperationLocker.Unlock(key)
-		writeWindowsMountDiagnostic("layer-operation-lock-released", m, target, 0, time.Since(started), unlockErr)
-		if unlockErr != nil {
-			if retErr == nil {
-				retErr = unlockErr
-			} else {
-				bklog.G(context.TODO()).WithError(unlockErr).WithField("source", m.Source).Warn("failed to unlock Windows layer operation")
-			}
-		}
-	}()
+	lm.layerLockKey = key
+}
 
-	return fn()
+func (lm *localMounter) unlockWindowsLayer(m mount.Mount, target string) {
+	if lm.layerLockKey == "" {
+		return
+	}
+
+	key := lm.layerLockKey
+	lm.layerLockKey = ""
+	unlockErr := windowsLayerOperationLocker.Unlock(key)
+	writeWindowsMountDiagnostic("layer-operation-lock-released", m, target, 0, 0, unlockErr)
+	if unlockErr != nil {
+		bklog.G(context.TODO()).WithError(unlockErr).WithField("source", m.Source).Warn("failed to unlock Windows layer operation")
+	}
 }
 
 func runWindowsDiagnosticCommand(dir, name, command string, args ...string) {
