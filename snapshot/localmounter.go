@@ -34,13 +34,13 @@ func LocalMounterWithMounts(mounts []mount.Mount, opts ...LocalMounterOpt) Mount
 }
 
 type localMounter struct {
-	mu           sync.Mutex
-	mounts       []mount.Mount
-	mountable    Mountable
-	target       string
-	release      func() error
-	forceRemount bool
-	layerLockKey string
+	mu                  sync.Mutex
+	mounts              []mount.Mount
+	mountable           Mountable
+	target              string
+	release             func() error
+	forceRemount        bool
+	windowsLayerLockKey string
 }
 
 func ForceRemount() LocalMounterOpt {
