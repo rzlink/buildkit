@@ -139,18 +139,18 @@ func (lm *localMounter) Unmount() error {
 }
 
 func (lm *localMounter) lockWindowsLayer(m mount.Mount) {
-	// Different localMounter instances can otherwise activate and deactivate
-	// the same HCS layer concurrently, which causes ERROR_SHARING_VIOLATION.
+	// HCS does not reliably allow separate localMounter instances to use the
+	// same layer concurrently or activate it while another mount releases it.
 	key := strings.ToLower(filepath.Clean(m.Source))
 	windowsLayerLocker.Lock(key)
-	lm.layerLockKey = key
+	lm.windowsLayerLockKey = key
 }
 
 func (lm *localMounter) unlockWindowsLayer() {
-	if lm.layerLockKey == "" {
+	if lm.windowsLayerLockKey == "" {
 		return
 	}
-	key := lm.layerLockKey
-	lm.layerLockKey = ""
+	key := lm.windowsLayerLockKey
+	lm.windowsLayerLockKey = ""
 	windowsLayerLocker.Unlock(key)
 }

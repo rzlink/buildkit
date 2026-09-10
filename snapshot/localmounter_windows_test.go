@@ -30,6 +30,7 @@ func TestWindowsLayerLockSerializesSameSource(t *testing.T) {
 
 	select {
 	case <-acquired:
+		lm2.unlockWindowsLayer()
 		t.Fatal("second lock acquired before the first local mounter released the layer")
 	case <-time.After(100 * time.Millisecond):
 	}
