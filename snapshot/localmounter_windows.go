@@ -2,19 +2,17 @@ package snapshot
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Microsoft/go-winio/pkg/bindfilter"
 	"github.com/containerd/containerd/v2/core/mount"
 	cerrdefs "github.com/containerd/errdefs"
-	"github.com/moby/locker"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
 
-var windowsLayerLocker = locker.New()
+const windowsLayerMountRetries = 8
 
 func (lm *localMounter) Mount() (string, error) {
 	lm.mu.Lock()
@@ -60,12 +58,9 @@ func (lm *localMounter) Mount() (string, error) {
 		}
 	} else {
 		// see https://github.com/moby/buildkit/issues/5807
-		// if it's a race condition issue, do max 2 retries with some backoff
-		// should adjust the retries if this persists but 1 retry
-		// seems to be enough.
-		lm.lockWindowsLayer(m)
-		if err := mountWithRetries(m, dir, 2); err != nil {
-			lm.unlockWindowsLayer()
+		// HCS can keep a layer busy for several seconds while another local
+		// mounter releases it, so retry sharing violations with bounded backoff.
+		if err := mountWithRetries(m, dir, windowsLayerMountRetries); err != nil {
 			return "", errors.Wrapf(err, "failed to mount %v", m)
 		}
 	}
@@ -76,7 +71,6 @@ func (lm *localMounter) Mount() (string, error) {
 
 func mountWithRetries(m mount.Mount, dir string, retries int) error {
 	errStr := "cannot access the file because it is being used by another process"
-	backoff := 30 * time.Millisecond
 	var err error
 
 	for i := range retries + 1 {
@@ -86,13 +80,21 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 			return err
 		}
 		if strings.Contains(err.Error(), errStr) {
-			time.Sleep(time.Duration(i+1) * backoff)
+			time.Sleep(windowsLayerMountRetryDelay(i))
 		} else {
 			return err
 		}
 	}
 
 	return err
+}
+
+func windowsLayerMountRetryDelay(attempt int) time.Duration {
+	delay := 50 * time.Millisecond << attempt
+	if delay > time.Second {
+		return time.Second
+	}
+	return delay
 }
 
 func (lm *localMounter) Unmount() error {
@@ -106,7 +108,6 @@ func (lm *localMounter) Unmount() error {
 		return errors.Wrapf(cerrdefs.ErrNotImplemented, "request to mount %d layers, only 1 is supported", len(lm.mounts))
 	}
 	m := lm.mounts[0]
-	defer lm.unlockWindowsLayer()
 
 	if lm.target != "" {
 		if m.Type == "bind" || m.Type == "rbind" {
@@ -136,21 +137,4 @@ func (lm *localMounter) Unmount() error {
 	}
 
 	return nil
-}
-
-func (lm *localMounter) lockWindowsLayer(m mount.Mount) {
-	// HCS does not reliably allow separate localMounter instances to use the
-	// same layer concurrently or activate it while another mount releases it.
-	key := strings.ToLower(filepath.Clean(m.Source))
-	windowsLayerLocker.Lock(key)
-	lm.windowsLayerLockKey = key
-}
-
-func (lm *localMounter) unlockWindowsLayer() {
-	if lm.windowsLayerLockKey == "" {
-		return
-	}
-	key := lm.windowsLayerLockKey
-	lm.windowsLayerLockKey = ""
-	windowsLayerLocker.Unlock(key)
 }
