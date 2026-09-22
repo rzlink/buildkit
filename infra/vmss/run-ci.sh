@@ -283,24 +283,22 @@ else
         else
             ok "Fetched upstream/master"
 
-            # Sync master — force-reset to upstream (fork master should not have unique commits)
-            git checkout master --quiet 2>/dev/null
-            if git merge upstream/master --ff-only --quiet 2>/dev/null; then
-                ok "Fast-forwarded master to upstream/master"
-            else
-                warn "Master diverged from upstream — resetting to upstream/master"
-                git reset --hard upstream/master --quiet 2>/dev/null
-            fi
-            if git push origin master --force --quiet 2>/dev/null; then
+            # Sync the fork's master directly from upstream. Do not check out
+            # master because another worktree may already have it checked out.
+            if git push origin upstream/master:refs/heads/master --force --quiet 2>/dev/null; then
                 ok "Pushed synced master to origin"
             else
                 warn "Failed to push master to origin"
             fi
 
             # Rebase feature branch
-            git checkout "$FEATURE_BRANCH" --quiet 2>/dev/null
-            log "Rebasing $FEATURE_BRANCH onto master..."
-            if git rebase master --quiet 2>/dev/null; then
+            if ! git checkout "$FEATURE_BRANCH" --quiet 2>/dev/null; then
+                err "Failed to check out $FEATURE_BRANCH"
+                notify_failure "Branch checkout failed" "Failed to check out $FEATURE_BRANCH before rebasing. Fix the local worktree and re-run CI."
+                exit 1
+            fi
+            log "Rebasing $FEATURE_BRANCH onto upstream/master..."
+            if git rebase upstream/master --quiet 2>/dev/null; then
                 ok "Rebase succeeded"
                 if git push origin "$FEATURE_BRANCH" --force-with-lease --quiet 2>/dev/null; then
                     ok "Pushed rebased branch to origin"
