@@ -79,7 +79,7 @@ func mountWithRetries(m mount.Mount, dir string, retries int) error {
 		if err == nil || i == retries {
 			return err
 		}
-		if strings.Contains(err.Error(), errStr) {
+		if strings.Contains(err.Error(), errStr) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
 			time.Sleep(windowsLayerMountRetryDelay(i))
 		} else {
 			return err
