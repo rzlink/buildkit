@@ -1004,10 +1004,10 @@ with support for passphrases.
 > [!NOTE]
 > On Windows containers, the forwarded SSH agent is exposed as the well-known
 > Windows OpenSSH named pipe `\\.\pipe\openssh-ssh-agent`, which is also the
-> default `target`. Windows OpenSSH connects to this pipe automatically and
-> ignores `SSH_AUTH_SOCK`, so that environment variable is not set. The `mode`,
-> `uid`, and `gid` options are not supported on Windows and are ignored; pipe
-> access is governed by a security descriptor instead.
+> default `target`. `SSH_AUTH_SOCK` is set to the first SSH mount target unless
+> it is already defined, allowing Windows OpenSSH to select a custom named pipe.
+> The `mode`, `uid`, and `gid` options are not supported on Windows and are
+> ignored; pipe access is governed by a security descriptor instead.
 
 #### Example: access to GitLab
 

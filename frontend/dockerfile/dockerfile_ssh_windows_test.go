@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/containerd/continuity/fs/fstest"
@@ -37,18 +38,26 @@ func testSSHWindowsAgentPipe(t *testing.T, sb integration.Sandbox) {
 	target := workers[0].Platforms[0]
 	require.Equal(t, "windows", target.OS, "SSH tests require a Windows worker")
 	binary := sshutil.BuildProbe(t, target.Architecture)
+	openSSHCheck := sshutil.BuildOpenSSHCheck(t, target.Architecture)
+	openSSHClient, openSSHLibCrypto := sshutil.OpenSSHRuntime(t, target.Architecture)
 	for _, tc := range []struct {
 		name     string
 		provider bool
 		keyFile  bool
 		optional bool
 		cycles   int
+		target   string
+		user     string
+		output   string
+		openSSH  bool
 	}{
 		{name: "required-no-provider"},
 		{name: "optional-no-provider", optional: true},
 		{name: "agent-identity-read-only", provider: true, cycles: 1},
 		{name: "key-file-identity", provider: true, keyFile: true, cycles: 1},
 		{name: "connection-lifecycle", provider: true, cycles: 5},
+		{name: "custom-target", provider: true, cycles: 1, target: `\\.\PIPE\custom-agent`, openSSH: true},
+		{name: "container-user", provider: true, cycles: 1, user: "ContainerUser", output: `C:\Users\ContainerUser\report.json`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := sshutil.NewAgent(t)
@@ -65,8 +74,18 @@ func testSSHWindowsAgentPipe(t *testing.T, sb integration.Sandbox) {
 				require.NoError(t, err)
 				attachables = []session.Attachable{provider}
 			}
-			args := []string{`C:\sshprobe.exe`, "-output", `C:\out\report.json`}
-			if tc.optional {
+			user := tc.user
+			if user == "" {
+				user = "ContainerAdministrator"
+			}
+			output := tc.output
+			if output == "" {
+				output = `C:\out\report.json`
+			}
+			args := []string{`C:\sshprobe.exe`, "-output", output}
+			if tc.openSSH {
+				args = []string{`C:\opensshcheck.exe`, "-ssh", `C:\ssh.exe`, "-expected", a.PublicKey, "-output", output}
+			} else if tc.optional {
 				args = append(args, "-absent")
 			} else {
 				args = append(args, "-expected", a.PublicKey, "-cycles", fmt.Sprint(tc.cycles))
@@ -76,19 +95,35 @@ func testSSHWindowsAgentPipe(t *testing.T, sb integration.Sandbox) {
 			}
 			command, err := json.Marshal(args)
 			require.NoError(t, err)
-			dockerfile := fmt.Sprintf(`FROM nanoserver AS test
-USER ContainerAdministrator
-COPY sshprobe.exe C:/sshprobe.exe
-RUN mkdir C:\out
-RUN --mount=type=ssh,required=%t %s
-FROM scratch
-COPY --from=test /out/ /
-`, !tc.optional, command)
-			// Only the executable enters the context; the private key remains on the host.
-			dir := integration.Tmpdir(t,
-				fstest.CreateFile("Dockerfile", []byte(dockerfile), 0600),
+			mount := "--mount=type=ssh"
+			if tc.target != "" {
+				mount += ",target=" + tc.target
+			}
+			copyTools := "COPY sshprobe.exe C:/sshprobe.exe"
+			contextFiles := []fstest.Applier{
 				fstest.CreateFile("sshprobe.exe", binary, 0755),
-			)
+			}
+			if tc.openSSH {
+				copyTools = "COPY opensshcheck.exe C:/opensshcheck.exe\nCOPY ssh.exe C:/ssh.exe\nCOPY libcrypto.dll C:/libcrypto.dll"
+				contextFiles = append(contextFiles,
+					fstest.CreateFile("opensshcheck.exe", openSSHCheck, 0755),
+					fstest.CreateFile("ssh.exe", openSSHClient, 0755),
+					fstest.CreateFile("libcrypto.dll", openSSHLibCrypto, 0755),
+				)
+			}
+			copySource := strings.ReplaceAll(output, `\`, "/")
+			dockerfile := "# escape=`\n" + fmt.Sprintf(`FROM nanoserver AS test
+%s
+USER ContainerAdministrator
+RUN mkdir C:\out
+USER %s
+RUN %s,required=%t %s
+FROM scratch
+COPY --from=test %s /report.json
+`, copyTools, user, mount, !tc.optional, command, copySource)
+			// Only test executables enter the context; the private key remains on the host.
+			contextFiles = append(contextFiles, fstest.CreateFile("Dockerfile", []byte(dockerfile), 0600))
+			dir := integration.Tmpdir(t, contextFiles...)
 			dest := sshutil.WorkDir(t)
 			solve := func() error {
 				_, err := f.Solve(sb.Context(), c, client.SolveOpt{
@@ -111,10 +146,20 @@ COPY --from=test /out/ /
 			require.NoError(t, err)
 			dt, err := os.ReadFile(filepath.Join(dest, "report.json"))
 			require.NoError(t, err)
+			if tc.openSSH {
+				require.Equal(t, "authenticated with Windows OpenSSH\n", string(dt))
+				a.CheckKey(t)
+				a.WaitIdle(t, 1)
+				return
+			}
 			var report probe.Report
 			require.NoError(t, json.Unmarshal(dt, &report))
 			require.Equal(t, tc.optional, report.Absent)
 			require.Equal(t, tc.cycles, report.Connections)
+			if tc.target != "" {
+				require.Equal(t, tc.target, report.Endpoint)
+				require.Equal(t, tc.target, report.AuthSock)
+			}
 			if tc.provider {
 				require.Equal(t, []string{a.PublicKey}, report.Keys)
 				require.Equal(t, !tc.keyFile, report.AddRejected)

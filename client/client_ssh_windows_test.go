@@ -33,8 +33,7 @@ func testSSHMountWindows(t *testing.T, sb integration.Sandbox) {
 	require.Equal(t, "windows", target.OS, "SSH tests require a Windows worker")
 	binary := sshutil.BuildProbe(t, target.Architecture)
 	base := llb.Image("nanoserver:latest", llb.Platform(target)).
-		File(llb.Mkfile("/sshprobe.exe", 0755, binary)).
-		User("ContainerAdministrator")
+		File(llb.Mkfile("/sshprobe.exe", 0755, binary))
 	for _, tc := range []struct {
 		name        string
 		provider    bool
@@ -44,6 +43,10 @@ func testSSHMountWindows(t *testing.T, sb integration.Sandbox) {
 		keyFile     bool
 		mutate      bool
 		connections int
+		target      string
+		user        string
+		reportPath  string
+		copyPath    string
 		wantError   string
 	}{
 		{name: "required-no-provider", wantError: "no SSH key "},
@@ -55,6 +58,8 @@ func testSSHMountWindows(t *testing.T, sb integration.Sandbox) {
 		{name: "custom-id-identity", provider: true, id: "customID", exposeID: true, connections: 1},
 		{name: "agent-read-only", provider: true, mutate: true, connections: 1},
 		{name: "connection-lifecycle", provider: true, connections: 5},
+		{name: "custom-target", provider: true, connections: 1, target: `\\.\pipe\custom-agent`},
+		{name: "container-user", provider: true, connections: 1, user: "ContainerUser", reportPath: `C:\Users\ContainerUser\ssh-report.json`, copyPath: `/Users/ContainerUser/ssh-report.json`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := sshutil.NewAgent(t)
@@ -84,7 +89,22 @@ func testSSHMountWindows(t *testing.T, sb integration.Sandbox) {
 			if tc.optional {
 				opts = append(opts, llb.SSHOptional)
 			}
-			args := []string{`C:\sshprobe.exe`, "-output", `C:\ssh-report.json`}
+			if tc.target != "" {
+				opts = append(opts, llb.SSHSocketTarget(tc.target))
+			}
+			user := tc.user
+			if user == "" {
+				user = "ContainerAdministrator"
+			}
+			reportPath := tc.reportPath
+			if reportPath == "" {
+				reportPath = `C:\ssh-report.json`
+			}
+			copyPath := tc.copyPath
+			if copyPath == "" {
+				copyPath = "/ssh-report.json"
+			}
+			args := []string{`C:\sshprobe.exe`, "-output", reportPath}
 			if tc.optional {
 				args = append(args, "-absent")
 			} else {
@@ -93,8 +113,8 @@ func testSSHMountWindows(t *testing.T, sb integration.Sandbox) {
 			if tc.mutate {
 				args = append(args, "-mutate")
 			}
-			run := base.Run(llb.Args(args), llb.AddSSHSocket(opts...), llb.IgnoreCache)
-			out := llb.Scratch().File(llb.Copy(run.Root(), "/ssh-report.json", "/ssh-report.json"))
+			run := base.User(user).Run(llb.Args(args), llb.AddSSHSocket(opts...), llb.IgnoreCache)
+			out := llb.Scratch().File(llb.Copy(run.Root(), copyPath, "/ssh-report.json"))
 			def, err := out.Marshal(sb.Context())
 			require.NoError(t, err)
 			dest := sshutil.WorkDir(t)

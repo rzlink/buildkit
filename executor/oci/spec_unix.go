@@ -13,3 +13,7 @@ func normalizeMountType(mType string) string {
 func isNamedPipeMount(_ mount.Mount) bool {
 	return false
 }
+
+func normalizeNamedPipeDestination(dest string) (string, error) {
+	return dest, nil
+}

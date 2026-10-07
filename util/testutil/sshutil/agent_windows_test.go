@@ -103,6 +103,29 @@ func TestBuildProbe(t *testing.T) {
 	a.WaitIdle(t, 2)
 }
 
+func TestBuildOpenSSHCheck(t *testing.T) {
+	a := NewAgent(t)
+	path := filepath.Join(WorkDir(t), "opensshcheck.exe")
+	require.NoError(t, os.WriteFile(path, BuildOpenSSHCheck(t, runtime.GOARCH), 0600))
+	sshPath, err := exec.LookPath("ssh.exe")
+	require.NoError(t, err, "Windows OpenSSH client is required")
+	output := filepath.Join(WorkDir(t), "result.txt")
+	cmd := exec.CommandContext(t.Context(), path, "-ssh", sshPath, "-expected", a.PublicKey, "-output", output)
+	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+a.Endpoint)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	dt, err := os.ReadFile(output)
+	require.NoError(t, err)
+	require.Equal(t, "authenticated with Windows OpenSSH\n", string(dt))
+	a.WaitIdle(t, 1)
+}
+
+func TestOpenSSHRuntime(t *testing.T) {
+	client, crypto := OpenSSHRuntime(t, runtime.GOARCH)
+	require.NotEmpty(t, client)
+	require.NotEmpty(t, crypto)
+}
+
 func TestSequentialConnectionsRequireClose(t *testing.T) {
 	first, second := net.Pipe()
 	defer first.Close()

@@ -11,6 +11,7 @@ import (
 	"github.com/moby/buildkit/solver/pb"
 	"github.com/moby/buildkit/util/system"
 	digest "github.com/opencontainers/go-digest"
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
@@ -135,16 +136,18 @@ func (e *ExecOp) Validate(ctx context.Context, c *Constraints) error {
 	return nil
 }
 
-// marshalOS returns the target OS for this exec, preferring the marshal-time
-// constraints platform, then the op's own platform, and defaulting to linux.
-func (e *ExecOp) marshalOS(c *Constraints) string {
-	if c.Platform != nil {
-		return c.Platform.OS
-	}
+func (e *ExecOp) marshalPlatform(ctx context.Context, c *Constraints) (*ocispecs.Platform, error) {
 	if e.constraints.Platform != nil {
-		return e.constraints.Platform.OS
+		return e.constraints.Platform, nil
 	}
-	return "linux"
+	p, err := getPlatform(e.base)(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	if p != nil {
+		return p, nil
+	}
+	return c.Platform, nil
 }
 
 func (e *ExecOp) Marshal(ctx context.Context, c *Constraints) (digest.Digest, []byte, *pb.OpMetadata, []*SourceLocation, error) {
@@ -168,39 +171,54 @@ func (e *ExecOp) Marshal(ctx context.Context, c *Constraints) (digest.Digest, []
 		return "", nil, nil, nil, err
 	}
 
-	if len(e.ssh) > 0 {
-		if e.marshalOS(c) == "windows" {
-			// Windows OpenSSH always connects to the fixed named pipe
-			// \\.\pipe\openssh-ssh-agent and ignores SSH_AUTH_SOCK. Every mount
-			// shares that single destination (there is no per-mount default like
-			// the Unix ssh_agent.N sockets), so default empty targets to the pipe
-			// and reject duplicates that would otherwise silently collide.
-			seen := make(map[string]struct{}, len(e.ssh))
-			for i := range e.ssh {
-				if e.ssh[i].Target == "" {
-					e.ssh[i].Target = windowsSSHAgentPipe
+	platform, err := e.marshalPlatform(ctx, c)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	marshalOS := "linux"
+	if platform != nil {
+		marshalOS = platform.OS
+	}
+
+	ssh := slices.Clone(e.ssh)
+	if len(ssh) > 0 {
+		if marshalOS == "windows" {
+			seen := make(map[string]struct{}, len(ssh))
+			for i := range ssh {
+				if ssh[i].Target == "" {
+					ssh[i].Target = windowsSSHAgentPipe
 				}
-				if _, ok := seen[e.ssh[i].Target]; ok {
-					return "", nil, nil, nil, errors.Errorf("multiple SSH mounts target the same Windows pipe %q; specify a distinct target for each", e.ssh[i].Target)
+				normalizedTarget := strings.ToLower(system.ToSlash(ssh[i].Target, marshalOS))
+				if _, ok := seen[normalizedTarget]; ok {
+					return "", nil, nil, nil, errors.Errorf("multiple SSH mounts target the same Windows pipe %q; specify a distinct target for each", ssh[i].Target)
 				}
-				seen[e.ssh[i].Target] = struct{}{}
+				seen[normalizedTarget] = struct{}{}
 			}
 		} else {
-			for i, s := range e.ssh {
+			for i, s := range ssh {
 				if s.Target == "" {
-					e.ssh[i].Target = fmt.Sprintf("/run/buildkit/ssh_agent.%d", i)
+					ssh[i].Target = fmt.Sprintf("/run/buildkit/ssh_agent.%d", i)
 				}
 			}
-			if _, ok := env.Get("SSH_AUTH_SOCK"); !ok {
-				env = env.AddOrReplace("SSH_AUTH_SOCK", e.ssh[0].Target)
+		}
+		_, hasAuthSock := env.Get("SSH_AUTH_SOCK")
+		if marshalOS == "windows" && !hasAuthSock {
+			for _, key := range env.Keys() {
+				if strings.EqualFold(key, "SSH_AUTH_SOCK") {
+					hasAuthSock = true
+					break
+				}
 			}
+		}
+		if !hasAuthSock {
+			env = env.AddOrReplace("SSH_AUTH_SOCK", ssh[0].Target)
 		}
 	}
 	if c.Caps != nil {
 		if err := c.Caps.Supports(pb.CapExecMetaSetsDefaultPath); err != nil {
 			// don't set PATH on Windows. #5445
-			if os := e.marshalOS(c); os != "windows" {
-				env = env.SetDefault("PATH", system.DefaultPathEnv(os))
+			if marshalOS != "windows" {
+				env = env.SetDefault("PATH", system.DefaultPathEnv(marshalOS))
 			}
 		} else {
 			addCap(&e.constraints, pb.CapExecMetaSetsDefaultPath)
@@ -485,7 +503,7 @@ func (e *ExecOp) Marshal(ctx context.Context, c *Constraints) (digest.Digest, []
 		}
 	}
 
-	for _, s := range e.ssh {
+	for _, s := range ssh {
 		pm := &pb.Mount{
 			Input:     int64(pb.Empty),
 			Dest:      s.Target,

@@ -202,6 +202,18 @@ func TestSSHWindowsExplicitDuplicateTargetError(t *testing.T) {
 	require.Contains(t, err.Error(), "same Windows pipe")
 }
 
+func TestSSHWindowsCaseInsensitiveDuplicateTargetError(t *testing.T) {
+	t.Parallel()
+
+	st := Image("foo").Run(Shlex("args"),
+		AddSSHSocket(),
+		AddSSHSocket(SSHSocketTarget(`\\.\PIPE\OPENSSH-SSH-AGENT`)),
+	).Root()
+	_, err := st.Marshal(t.Context(), windowsPlatform)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "same Windows pipe")
+}
+
 // TestSSHWindowsDistinctTargetsOK verifies distinct targets marshal cleanly on
 // Windows.
 func TestSSHWindowsDistinctTargetsOK(t *testing.T) {
@@ -215,6 +227,63 @@ func TestSSHWindowsDistinctTargetsOK(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestSSHWindowsImagePlatformDefaults(t *testing.T) {
+	t.Parallel()
+
+	st := Image("foo", windowsPlatform).Run(Shlex("args"), AddSSHSocket()).Root()
+	def, err := st.Marshal(t.Context(), LinuxAmd64)
+	require.NoError(t, err)
+
+	exec := findExecOp(t, def)
+	require.NotNil(t, exec.platform)
+	require.Equal(t, "windows", exec.platform.OS)
+	require.Equal(t, windowsSSHAgentPipe, exec.exec.Mounts[1].Dest)
+	require.Contains(t, exec.exec.Meta.Env, "SSH_AUTH_SOCK="+windowsSSHAgentPipe)
+}
+
+func TestSSHMarshalDoesNotReuseDefaultTarget(t *testing.T) {
+	t.Parallel()
+
+	st := Image("foo").Run(Shlex("args"), AddSSHSocket()).Root()
+	linuxDef, err := st.Marshal(t.Context(), LinuxAmd64)
+	require.NoError(t, err)
+	require.Equal(t, "/run/buildkit/ssh_agent.0", findExecOp(t, linuxDef).exec.Mounts[1].Dest)
+
+	windowsDef, err := st.Marshal(t.Context(), windowsPlatform)
+	require.NoError(t, err)
+	exec := findExecOp(t, windowsDef)
+	require.Equal(t, windowsSSHAgentPipe, exec.exec.Mounts[1].Dest)
+	require.Contains(t, exec.exec.Meta.Env, "SSH_AUTH_SOCK="+windowsSSHAgentPipe)
+}
+
+func TestSSHWindowsCustomTargetEnv(t *testing.T) {
+	t.Parallel()
+
+	const target = `\\.\pipe\custom-agent`
+	st := Image("foo").Run(Shlex("args"), AddSSHSocket(SSHSocketTarget(target))).Root()
+	def, err := st.Marshal(t.Context(), windowsPlatform)
+	require.NoError(t, err)
+	require.Contains(t, findExecOp(t, def).exec.Meta.Env, "SSH_AUTH_SOCK="+target)
+
+	st = Image("foo").
+		AddEnv("SSH_AUTH_SOCK", `\\.\pipe\provided-agent`).
+		Run(Shlex("args"), AddSSHSocket(SSHSocketTarget(target))).
+		Root()
+	def, err = st.Marshal(t.Context(), windowsPlatform)
+	require.NoError(t, err)
+	require.Contains(t, findExecOp(t, def).exec.Meta.Env, `SSH_AUTH_SOCK=\\.\pipe\provided-agent`)
+
+	st = Image("foo").
+		AddEnv("ssh_auth_sock", `\\.\pipe\lowercase-agent`).
+		Run(Shlex("args"), AddSSHSocket(SSHSocketTarget(target))).
+		Root()
+	def, err = st.Marshal(t.Context(), windowsPlatform)
+	require.NoError(t, err)
+	env := findExecOp(t, def).exec.Meta.Env
+	require.Contains(t, env, `ssh_auth_sock=\\.\pipe\lowercase-agent`)
+	require.NotContains(t, env, "SSH_AUTH_SOCK="+target)
+}
+
 // TestSSHMultipleDefaultsNonWindowsOK verifies the duplicate guard is
 // Windows-only: on other platforms multiple default SSH mounts get distinct
 // per-index socket targets and marshal without error.
@@ -224,4 +293,21 @@ func TestSSHMultipleDefaultsNonWindowsOK(t *testing.T) {
 	st := Image("foo").Run(Shlex("args"), AddSSHSocket(), AddSSHSocket()).Root()
 	_, err := st.Marshal(t.Context(), LinuxAmd64)
 	require.NoError(t, err)
+}
+
+type execOpWithPlatform struct {
+	exec     *pb.ExecOp
+	platform *pb.Platform
+}
+
+func findExecOp(t *testing.T, def *Definition) execOpWithPlatform {
+	t.Helper()
+	_, ops := parseDef(t, def.Def)
+	for _, op := range ops {
+		if exec := op.GetExec(); exec != nil {
+			return execOpWithPlatform{exec: exec, platform: op.Platform}
+		}
+	}
+	t.Fatal("exec op not found")
+	return execOpWithPlatform{}
 }

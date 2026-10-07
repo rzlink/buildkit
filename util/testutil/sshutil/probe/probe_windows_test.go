@@ -79,6 +79,11 @@ func TestCheckRejection(t *testing.T) {
 
 func TestDefaults(t *testing.T) {
 	t.Setenv("SSH_AUTH_SOCK", "")
+	require.Equal(t, `\\.\pipe\openssh-ssh-agent`, defaultEndpoint())
+
+	t.Setenv("SSH_AUTH_SOCK", `\\.\pipe\custom-agent`)
+	require.Equal(t, `\\.\pipe\custom-agent`, defaultEndpoint())
+	require.NoError(t, checkDefaults(Report{Endpoint: `\\.\pipe\custom-agent`, AuthSock: `\\.\pipe\custom-agent`}))
 	require.Error(t, checkDefaults(Report{Endpoint: "not the default", AuthSock: "unexpected"}))
 }
 
