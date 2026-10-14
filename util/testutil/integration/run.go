@@ -29,6 +29,7 @@ import (
 	"github.com/moby/buildkit/util/contentutil"
 	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/semaphore"
 )
@@ -252,7 +253,12 @@ func Run(t *testing.T, testCases []Test, opt ...TestOpt) {
 						}()
 						tc.Run(t, sb)
 					})
-					require.True(t, ok)
+					if runtime.GOOS == "windows" {
+						// Windows tests run sequentially, so a fatal assertion would stop the remaining tests.
+						assert.True(t, ok)
+					} else {
+						require.True(t, ok)
+					}
 				}(fn, name, br, tc, mv)
 			}
 		}
