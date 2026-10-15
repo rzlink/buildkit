@@ -19,7 +19,6 @@ import (
 )
 
 func testSBOMScannerImage(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureSBOM)
 	ctx := sb.Context()
 
@@ -35,7 +34,7 @@ func testSBOMScannerImage(t *testing.T, sb integration.Sandbox) {
 
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
+	dockerfile := []byte(integration.UnixOrWindows(`
 FROM busybox:latest
 COPY <<-"EOF" /scan.sh
 	set -e
@@ -48,10 +47,23 @@ COPY <<-"EOF" /scan.sh
 	BUNDLE
 EOF
 CMD sh /scan.sh
-`)
+`, `
+FROM nanoserver:latest
+COPY scan.cmd C:\scan.cmd
+COPY spdx.json C:\spdx.json
+CMD ["cmd", "/S", "/C", "C:\\scan.cmd"]
+`))
+	scannerFiles := integration.UnixOrWindows(
+		[]fstest.Applier{fstest.CreateFile("Dockerfile", dockerfile, 0600)},
+		[]fstest.Applier{
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("scan.cmd", []byte("@echo off\r\ncopy /Y C:\\spdx.json \"%BUILDKIT_SCAN_DESTINATION%\\spdx.json\" >NUL\r\n"), 0600),
+			fstest.CreateFile("spdx.json", []byte(`{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://spdx.dev/Document","predicate":{"name":"sbom-scan"}}`), 0600),
+		},
+	)
 	scannerDir := integration.Tmpdir(
 		t,
-		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		scannerFiles...,
 	)
 
 	scannerTarget := registry + "/buildkit/testsbomscanner:latest"
@@ -72,15 +84,25 @@ CMD sh /scan.sh
 	}, nil)
 	require.NoError(t, err)
 
-	dockerfile = []byte(`
+	dockerfile = []byte(integration.UnixOrWindows(`
 FROM scratch
 COPY <<EOF /foo
 data
 EOF
-`)
+`, `
+FROM nanoserver
+COPY foo C:\foo
+`))
+	targetFiles := integration.UnixOrWindows(
+		[]fstest.Applier{fstest.CreateFile("Dockerfile", dockerfile, 0600)},
+		[]fstest.Applier{
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("data\n"), 0600),
+		},
+	)
 	dir := integration.Tmpdir(
 		t,
-		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		targetFiles...,
 	)
 
 	target := registry + "/buildkit/testsbomscannertarget:latest"
@@ -112,7 +134,9 @@ EOF
 
 	img := imgs.Find(platforms.Format(platforms.Normalize(platforms.DefaultSpec())))
 	require.NotNil(t, img)
-	require.Equal(t, []byte("data\n"), img.Layers[0]["foo"].Data)
+	layerIndex := integration.UnixOrWindows(0, len(img.Layers)-1)
+	layerPath := integration.UnixOrWindows("foo", "Files/foo")
+	require.Equal(t, []byte("data\n"), img.Layers[layerIndex][layerPath].Data)
 
 	att := imgs.Find("unknown/unknown")
 	require.Equal(t, 1, len(att.LayersRaw))
@@ -124,7 +148,7 @@ EOF
 }
 
 func testSBOMScannerArgs(t *testing.T, sb integration.Sandbox) {
-	integration.SkipOnPlatform(t, "windows")
+	integration.SkipOnPlatform(t, "windows", "Windows snapshotter intermittently fails to activate scanner layers (hcsshim sharing violation)")
 	workers.CheckFeatureCompat(t, sb, workers.FeatureDirectPush, workers.FeatureSBOM)
 	ctx := sb.Context()
 
@@ -140,7 +164,7 @@ func testSBOMScannerArgs(t *testing.T, sb integration.Sandbox) {
 
 	f := getFrontend(t, sb)
 
-	dockerfile := []byte(`
+	dockerfile := []byte(integration.UnixOrWindows(`
 FROM busybox:latest
 COPY <<-"EOF" /scan.sh
 	set -e
@@ -164,11 +188,26 @@ COPY <<-"EOF" /scan.sh
 	fi
 EOF
 CMD sh /scan.sh
-`)
+`, `
+FROM nanoserver:latest
+COPY scan.cmd C:\scan.cmd
+COPY core.json C:\core.json
+COPY extra.json C:\extra.json
+CMD ["cmd", "/S", "/C", "C:\\scan.cmd"]
+`))
+	scannerFiles := integration.UnixOrWindows(
+		[]fstest.Applier{fstest.CreateFile("Dockerfile", dockerfile, 0600)},
+		[]fstest.Applier{
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("scan.cmd", []byte("@echo off\r\ncopy /Y C:\\core.json \"%BUILDKIT_SCAN_DESTINATION%\\spdx.json\" >NUL\r\nif not defined BUILDKIT_SCAN_SOURCE_EXTRAS goto :done\r\nset \"EXTRAS=%BUILDKIT_SCAN_SOURCE_EXTRAS:/=\\%\"\r\nfor /D %%F in (\"%EXTRAS%\\*\") do copy /Y C:\\extra.json \"%BUILDKIT_SCAN_DESTINATION%\\%%~nxF.spdx.json\" >NUL\r\n:done\r\n"), 0600),
+			fstest.CreateFile("core.json", []byte(`{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://spdx.dev/Document","predicate":{"name":"core"}}`), 0600),
+			fstest.CreateFile("extra.json", []byte(`{"_type":"https://in-toto.io/Statement/v1","predicateType":"https://spdx.dev/Document","predicate":{"name":"extra"}}`), 0600),
+		},
+	)
 
 	scannerDir := integration.Tmpdir(
 		t,
-		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		scannerFiles...,
 	)
 
 	scannerTarget := registry + "/buildkit/testsbomscannerargs:latest"
@@ -190,16 +229,27 @@ CMD sh /scan.sh
 	require.NoError(t, err)
 
 	// scan an image with no additional sboms
-	dockerfile = []byte(`
+	dockerfile = []byte(integration.UnixOrWindows(`
 FROM scratch as base
 COPY <<EOF /foo
 data
 EOF
 FROM base
-`)
+`, `
+FROM nanoserver AS base
+COPY foo C:\foo
+FROM base
+`))
+	targetFiles := integration.UnixOrWindows(
+		[]fstest.Applier{fstest.CreateFile("Dockerfile", dockerfile, 0600)},
+		[]fstest.Applier{
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("foo", []byte("data\n"), 0600),
+		},
+	)
 	dir := integration.Tmpdir(
 		t,
-		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		targetFiles...,
 	)
 
 	target := registry + "/buildkit/testsbomscannerargstarget1:latest"
@@ -240,7 +290,7 @@ FROM base
 	require.NoError(t, json.Unmarshal(att.LayersRaw[0], &attest))
 	require.Subset(t, attest.Predicate, map[string]any{"name": "core"})
 
-	dockerfile = []byte(`
+	dockerfile = []byte(integration.UnixOrWindows(`
 ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
 
 FROM scratch as file
@@ -260,10 +310,35 @@ RUN non-existent-command-would-fail
 
 FROM base
 ARG BUILDKIT_SBOM_SCAN_STAGE=true
-`)
+`, `
+ARG BUILDKIT_SBOM_SCAN_CONTEXT=true
+
+FROM nanoserver AS file
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY file C:\file
+
+FROM nanoserver AS base
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY --from=file C:\file C:\foo
+
+FROM nanoserver AS base2
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+COPY --from=file C:\file C:\bar
+RUN non-existent-command-would-fail
+
+FROM base
+ARG BUILDKIT_SBOM_SCAN_STAGE=true
+`))
+	targetFiles = integration.UnixOrWindows(
+		[]fstest.Applier{fstest.CreateFile("Dockerfile", dockerfile, 0600)},
+		[]fstest.Applier{
+			fstest.CreateFile("Dockerfile", dockerfile, 0600),
+			fstest.CreateFile("file", []byte("data\n"), 0600),
+		},
+	)
 	dir = integration.Tmpdir(
 		t,
-		fstest.CreateFile("Dockerfile", dockerfile, 0600),
+		targetFiles...,
 	)
 
 	// scan an image with additional sboms

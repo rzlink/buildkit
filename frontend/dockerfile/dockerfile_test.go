@@ -315,6 +315,25 @@ func TestIntegration(t *testing.T) {
 	integration.Run(t, outlineTests, opts...)
 	integration.Run(t, targetsTests, opts...)
 
+	if runtime.GOOS == "windows" {
+		integration.Run(t, integration.TestFuncs(
+			testSourceDateEpochWithoutExporter,
+			testSourceDateEpochDockerfileDefault,
+			testSourceDateEpochDockerfileDefaultOverride,
+			testSourceDateEpochDockerfileDefaultReset,
+			testSourceDateEpochDockerfileDefaultInvalid,
+			testSourceDateEpochContextGit,
+			testSourceDateEpochContextHTTPLastModified,
+			testSourceDateEpochContextHTTPArchive,
+			testSourceDateEpochContextLocalUnset,
+			testSourceDateEpochStageHTTPArchive,
+			testSourceDateEpochStageOverride,
+			testSourceDateEpochStageInvalid,
+			testSourceDateEpochNamedContextHTTPLastModified,
+			testSourceDateEpochNamedContextHTTPArchive,
+		), opts...)
+	}
+
 	// the rest of the tests are meant for non-Windows, skipping on Windows.
 	integration.SkipOnPlatform(t, "windows")
 
